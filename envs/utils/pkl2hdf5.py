@@ -61,7 +61,7 @@ def create_hdf5_from_dict(hdf5_group, data_dict):
             create_hdf5_from_dict(subgroup, value)
         elif isinstance(value, list):
             value = np.array(value)
-            if "rgb" in key:
+            if "rgb" in key or key == "video_frame":
                 encode_data, max_len = images_encoding(value)
                 hdf5_group.create_dataset(key, data=encode_data, dtype=f"S{max_len}")
             else:
@@ -81,7 +81,13 @@ def pkl_files_to_hdf5_and_video(pkl_files, hdf5_path, video_path):
         pkl_file = load_pkl_file(pkl_file_path)
         append_data_to_structure(data_list, pkl_file)
 
-    images_to_video(np.array(data_list["observation"]["head_camera"]["rgb"]), out_path=video_path)
+    # Prefer the explicit "video_frame" stream (set according to
+    # `camera.third_person_view` in the task config). Fall back to head_camera
+    # rgb for backwards compatibility.
+    video_frames = data_list.get("video_frame", None)
+    if video_frames is None or (isinstance(video_frames, list) and len(video_frames) == 0):
+        video_frames = data_list["observation"]["head_camera"]["rgb"]
+    images_to_video(np.array(video_frames), out_path=video_path)
 
     with h5py.File(hdf5_path, "w") as f:
         create_hdf5_from_dict(f, data_list)

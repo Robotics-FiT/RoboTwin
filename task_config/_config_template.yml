@@ -18,6 +18,11 @@ camera:
   wrist_camera_type: D435
   collect_head_camera: true
   collect_wrist_camera: true
+  # Which view is used to render the final mp4 video.
+  #   default  -> head_camera (first-person / wrist head)
+  #   observer -> static third-person observer_camera (covers both arms)
+  #   random   -> (reserved) randomised third-person camera for data augmentation
+  third_person_view: default
 data_type:
   rgb: true
   third_view: false

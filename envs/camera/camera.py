@@ -57,6 +57,14 @@ class Camera:
 
         self.collect_head_camera = kwags["camera"].get("collect_head_camera", True)
         self.collect_wrist_camera = kwags["camera"].get("collect_wrist_camera", True)
+        # Which camera feed is used for the final mp4 video & data-augmentation.
+        #   - "default"  : use head_camera (original behavior)
+        #   - "observer" : use the static observer_camera (third-person view)
+        #   - "random"   : (reserved for future) observer_camera with randomised pose
+        self.third_person_view = kwags["camera"].get("third_person_view", "default")
+        if self.third_person_view not in ("default", "observer", "random"):
+            print(f"[Camera] Unknown third_person_view '{self.third_person_view}', fallback to 'default'.")
+            self.third_person_view = "default"
 
         # embodiment = kwags.get('embodiment')
         # embodiment_config_path = os.path.join(CONFIGS_PATH, '_embodiment_config.yml')
@@ -216,19 +224,32 @@ class Camera:
                 # self.static_sensor_camera_list.append(sensor_camera)
                 self.static_camera_config.append(camera_config)
 
-        # observer camera
+        # observer camera (third-person view).
+        # Resolution is bumped to 640x480 so the resulting mp4 is usable for data
+        # augmentation. The pose is chosen to cover the whole dual-arm workspace.
+        if self.third_person_view == "default":
+            observer_w, observer_h, observer_fovy_deg = 320, 240, 93
+            observer_cam_pos = np.array([0.0, 0.23, 1.33])
+            observer_cam_forward = np.array([0, -1, -1.02])
+            observer_cam_left = np.array([1, 0, 0])
+        else:
+            # larger frame + wider fov for third-person recording
+            observer_w, observer_h, observer_fovy_deg = 640, 480, 70
+            # stand in front of the robot base (robot base is around y=-0.65),
+            # look towards the arms and the tabletop.
+            observer_cam_pos = np.array([0.0, -1.6, 1.4])
+            observer_cam_forward = np.array([0.0, 1.0, -0.5])
+            observer_cam_left = np.array([1.0, 0.0, 0.0])
         self.observer_camera = scene.add_camera(
             name="observer_camera",
-            width=320,
-            height=240,
-            fovy=np.deg2rad(93),
+            width=observer_w,
+            height=observer_h,
+            fovy=np.deg2rad(observer_fovy_deg),
             near=near,
             far=far,
         )
-        observer_cam_pos = np.array([0.0, 0.23, 1.33])
-        observer_cam_forward = np.array([0, -1, -1.02])
-        # observer_cam_left = np.array([1,-1, 0])
-        observer_cam_left = np.array([1, 0, 0])
+        observer_cam_forward = observer_cam_forward / np.linalg.norm(observer_cam_forward)
+        observer_cam_left = observer_cam_left / np.linalg.norm(observer_cam_left)
         observer_up = np.cross(observer_cam_forward, observer_cam_left)
         observer_mat44 = np.eye(4)
         observer_mat44[:3, :3] = np.stack([observer_cam_forward, observer_cam_left, observer_up], axis=1)
@@ -372,6 +393,27 @@ class Camera:
             return camera_rgb_img
 
         return _get_rgb(self.observer_camera)
+
+    def get_video_frame(self, head_rgb=None):
+        """
+        Return a single RGB frame (H, W, 3) that will be used to render the final mp4.
+        The source is selected by ``self.third_person_view``:
+          - "default"  : head_camera (caller may pass its already-rendered rgb to save a re-render).
+          - "observer" : static observer_camera (third-person).
+          - "random"   : currently aliased to "observer"; reserved for future per-episode
+                         or per-frame random camera pose.
+        """
+        if self.third_person_view == "default":
+            if head_rgb is not None:
+                return head_rgb
+            if self.collect_head_camera and self.head_camera_id is not None:
+                head_cam = self.static_camera_list[self.head_camera_id]
+                rgba = head_cam.get_picture("Color")
+                return (rgba * 255).clip(0, 255).astype("uint8")[:, :, :3]
+            # fallback: observer
+            return self.get_observer_rgb()
+        # "observer" or "random" (random reuses observer for now)
+        return self.get_observer_rgb()
 
     # Get Camera Segmentation
     def get_segmentation(self, level="mesh") -> dict:

@@ -454,6 +454,16 @@ class Base_Task(gym.Env):
         if self.data_type.get("third_view", False):
             third_view_rgb = self.cameras.get_observer_rgb()
             pkl_dic["third_view_rgb"] = third_view_rgb
+
+        # Frame that will be written to the final .mp4 video. Selected by
+        # `camera.third_person_view` in the task config ("default" = head_camera,
+        # "observer" = third-person observer camera).
+        _head_rgb = None
+        if self.data_type.get("rgb", False):
+            _head_cam_rgb = pkl_dic["observation"].get("head_camera", {}).get("rgb", None)
+            if _head_cam_rgb is not None:
+                _head_rgb = _head_cam_rgb
+        pkl_dic["video_frame"] = self.cameras.get_video_frame(head_rgb=_head_rgb)
         # mesh_segmentation
         if self.data_type.get("mesh_segmentation", False):
             mesh_segmentation = self.cameras.get_segmentation(level="mesh")
