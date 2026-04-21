@@ -19,8 +19,16 @@ camera:
   wrist_camera_type: D435
   collect_head_camera: true
   collect_wrist_camera: true
-  # Use the static third-person observer_camera for the rendered mp4.
-  third_person_view: observer
+  # "default" -> head_camera, "observer" -> fixed third-person, "random" -> per-episode
+  # random pose on a partial sphere around the tabletop (good for visual augmentation).
+  third_person_view: random
+  # Knobs for the random third-person view (only used when third_person_view == random).
+  random_view:
+    azimuth_range: [-90.0, 90.0]      # deg; 0 = robot front, +/-90 = robot side
+    elevation_range: [15.0, 70.0]     # deg above horizon
+    radius_range: [1.1, 1.8]          # metres from the tabletop centre
+    look_at: [0.0, 0.0, 0.74]         # tabletop centre in world frame (z auto-biased)
+    look_at_jitter: 0.05              # metres of uniform jitter on the look-at point
 data_type:
   rgb: true
   third_view: false

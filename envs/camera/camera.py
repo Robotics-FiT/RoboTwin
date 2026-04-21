@@ -66,6 +66,20 @@ class Camera:
             print(f"[Camera] Unknown third_person_view '{self.third_person_view}', fallback to 'default'.")
             self.third_person_view = "default"
 
+        # Parameters for the "random" third-person view.
+        # Position is sampled on a partial sphere around the tabletop centre;
+        # look-at point is the tabletop centre plus a small jitter.
+        # Ranges may be overridden in the task config under camera.random_view.
+        _rv = kwags["camera"].get("random_view", {}) or {}
+        # azimuth=0 -> camera stands on -y side (front of robot); positive -> +x side.
+        self.random_view_azimuth_range = tuple(_rv.get("azimuth_range", [-90.0, 90.0]))
+        self.random_view_elevation_range = tuple(_rv.get("elevation_range", [15.0, 70.0]))
+        self.random_view_radius_range = tuple(_rv.get("radius_range", [1.1, 1.8]))
+        # Tabletop centre in world frame. table_z_bias is applied automatically
+        # so the centre follows random_table_height.
+        self.random_view_look_at = np.array(_rv.get("look_at", [0.0, 0.0, 0.74]), dtype=np.float64)
+        self.random_view_look_at_jitter = float(_rv.get("look_at_jitter", 0.05))
+
         # embodiment = kwags.get('embodiment')
         # embodiment_config_path = os.path.join(CONFIGS_PATH, '_embodiment_config.yml')
         # with open(embodiment_config_path, 'r', encoding='utf-8') as f:
@@ -232,8 +246,14 @@ class Camera:
             observer_cam_pos = np.array([0.0, 0.23, 1.33])
             observer_cam_forward = np.array([0, -1, -1.02])
             observer_cam_left = np.array([1, 0, 0])
+        elif self.third_person_view == "random":
+            # Per-episode random pose on a partial sphere around the tabletop.
+            observer_w, observer_h, observer_fovy_deg = 640, 480, 70
+            observer_cam_pos, observer_cam_forward, observer_cam_left = (
+                self._sample_random_observer_pose()
+            )
         else:
-            # larger frame + wider fov for third-person recording
+            # "observer": fixed third-person view in front of the robot.
             observer_w, observer_h, observer_fovy_deg = 640, 480, 70
             # stand in front of the robot base (robot base is around y=-0.65),
             # look towards the arms and the tabletop.
@@ -383,6 +403,68 @@ class Camera:
         # res['head_sensor']['rgb'] = _get_sensor_rgba(self.head_sensor)
 
         return res
+
+    def _sample_random_observer_pose(self):
+        """
+        Sample a per-episode random pose for the third-person observer camera.
+
+        The camera position is drawn on a partial sphere around the tabletop
+        centre (``random_view_look_at`` + ``table_z_bias``) with:
+            * azimuth  in ``random_view_azimuth_range``   (deg; 0 = robot front)
+            * elevation in ``random_view_elevation_range`` (deg; above horizon)
+            * radius   in ``random_view_radius_range``    (metres)
+        Then the camera looks towards the tabletop centre perturbed by a small
+        uniform jitter (``random_view_look_at_jitter``) to avoid always framing
+        the scene dead-centre.
+
+        Returns three numpy vectors (``pos``, ``forward``, ``left``) consumed by
+        the generic observer pose-building code in ``load_camera``.
+        """
+        # --- sample spherical coordinates
+        az_lo, az_hi = self.random_view_azimuth_range
+        el_lo, el_hi = self.random_view_elevation_range
+        r_lo, r_hi = self.random_view_radius_range
+        azimuth = np.deg2rad(np.random.uniform(az_lo, az_hi))
+        elevation = np.deg2rad(np.random.uniform(el_lo, el_hi))
+        radius = np.random.uniform(r_lo, r_hi)
+
+        # Tabletop centre (follows random_table_height via table_z_bias).
+        centre = self.random_view_look_at.copy()
+        centre[2] += self.table_z_bias
+
+        # azimuth = 0 -> camera stands on the -y side (in front of the robot),
+        # azimuth = +pi/2 -> +x side, -pi/2 -> -x side.
+        offset = np.array([
+            np.sin(azimuth) * np.cos(elevation),
+            -np.cos(azimuth) * np.cos(elevation),
+            np.sin(elevation),
+        ]) * radius
+        pos = centre + offset
+
+        # Jittered look-at point, then forward vector.
+        j = self.random_view_look_at_jitter
+        look_at = centre + np.random.uniform(-j, j, size=3)
+        forward = look_at - pos
+        forward_norm = np.linalg.norm(forward)
+        if forward_norm < 1e-8:
+            forward = np.array([0.0, 1.0, -0.5])
+        else:
+            forward = forward / forward_norm
+
+        # Build a "left" axis orthogonal to forward, using world up as reference.
+        world_up = np.array([0.0, 0.0, 1.0])
+        # If forward is nearly parallel to world_up, fall back to world +x.
+        if abs(np.dot(forward, world_up)) > 0.999:
+            ref = np.array([1.0, 0.0, 0.0])
+        else:
+            ref = world_up
+        left = np.cross(ref, forward)
+        left_norm = np.linalg.norm(left)
+        if left_norm < 1e-8:
+            left = np.array([1.0, 0.0, 0.0])
+        else:
+            left = left / left_norm
+        return pos, forward, left
 
     def get_observer_rgb(self) -> dict:
         self.observer_camera.take_picture()
