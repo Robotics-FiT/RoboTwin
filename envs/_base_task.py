@@ -82,6 +82,11 @@ class Base_Task(gym.Env):
         self.crazy_random_light_rate = random_setting.get("crazy_random_light_rate", 0)
         self.crazy_random_light = (0 if not self.random_light else np.random.rand() < self.crazy_random_light_rate)
         self.random_embodiment = random_setting.get("random_embodiment", False)  # TODO
+        # Scene tweaks (not randomised, but colocated with the domain-
+        # randomisation block for config convenience). When ``remove_wall`` is
+        # True the back wall is simply not created, giving an unobstructed
+        # view for third-person cameras / data augmentation.
+        self.remove_wall = random_setting.get("remove_wall", False)
 
         self.file_path = []
         self.plan_success = True
@@ -293,15 +298,18 @@ class Base_Task(gym.Env):
         else:
             self.wall_texture, self.table_texture = None, None
 
-        self.wall = create_box(
-            self.scene,
-            sapien.Pose(p=[0, 1, 1.5]),
-            half_size=[3, 0.6, 1.5],
-            color=(1, 0.9, 0.9),
-            name="wall",
-            texture_id=self.wall_texture,
-            is_static=True,
-        )
+        if not getattr(self, "remove_wall", False):
+            self.wall = create_box(
+                self.scene,
+                sapien.Pose(p=[0, 1, 1.5]),
+                half_size=[3, 0.6, 1.5],
+                color=(1, 0.9, 0.9),
+                name="wall",
+                texture_id=self.wall_texture,
+                is_static=True,
+            )
+        else:
+            self.wall = None
 
         self.table = create_table(
             self.scene,

@@ -14,6 +14,10 @@ domain_randomization:
   random_table_height: 0.03
   random_light: true
   crazy_random_light_rate: 0.05
+  # Scene tweak (not a randomiser). Set to true to skip creating the back
+  # wall, which gives third-person / augmentation cameras an unobstructed
+  # view of the robot and tabletop.
+  remove_wall: true
 camera:
   head_camera_type: D435
   wrist_camera_type: D435
@@ -52,7 +56,7 @@ eval_video_log: true
 # interpolating to the next target (1.0 = no settle phase = smoothest motion).
 random_dance:
   n_steps: 30
-  arm_delta: 1.2        # radians (~69 deg) around home state per joint
+  arm_delta: 0.6        # radians (~34 deg) around home state per joint
   gripper_toggle_p: 0.2
   hold_substeps: 80     # physics substeps spent converging to each key-frame
   save_every: 8         # save one observation every N substeps
