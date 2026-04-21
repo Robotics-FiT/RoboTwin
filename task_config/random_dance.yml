@@ -61,3 +61,10 @@ random_dance:
   hold_substeps: 80     # physics substeps spent converging to each key-frame
   save_every: 8         # save one observation every N substeps
   cruise_ratio: 1.0     # [0.05, 1.0]; lower -> more settle time between key-frames
+  # Centre of the random joint sampling (task-level "dance home", independent of
+  # the embodiment's homestate). Tweak so both arms spread open and face the
+  # observer camera. Joint order: [j1 shoulder-yaw, j2 shoulder-pitch,
+  # j3 elbow, j4, j5 wrist-pitch, j6]. Comment out to fall back to the
+  # built-in defaults in envs/random_dance.py.
+  left_home:  [ 0.30, -0.40, 0.80, 0.0, 0.80, 0.0]
+  right_home: [-0.30, -0.40, 0.80, 0.0, 0.80, 0.0]

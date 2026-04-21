@@ -432,11 +432,12 @@ class Camera:
         centre = self.random_view_look_at.copy()
         centre[2] += self.table_z_bias
 
-        # azimuth = 0 -> camera stands on the -y side (in front of the robot),
+        # azimuth = 0 -> camera stands on the +y side (opposite the robot,
+        # looking across the tabletop towards the robot, which sits at -y).
         # azimuth = +pi/2 -> +x side, -pi/2 -> -x side.
         offset = np.array([
             np.sin(azimuth) * np.cos(elevation),
-            -np.cos(azimuth) * np.cos(elevation),
+            np.cos(azimuth) * np.cos(elevation),
             np.sin(elevation),
         ]) * radius
         pos = centre + offset

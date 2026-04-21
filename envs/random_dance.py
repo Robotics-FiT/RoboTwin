@@ -38,6 +38,19 @@ class random_dance(Base_Task):
     DEFAULT_HOLD_SUBSTEPS = 40      # physics substeps spent holding each key-frame
     DEFAULT_SAVE_EVERY = 5          # save an observation every N physics substeps
 
+    # Independent "dance home" used as the centre of the random joint sampling.
+    # The embodiment's own ``homestate`` (e.g. all-zeros for aloha-agilex) makes
+    # both arms sit vertically along the body midline, which looks cramped on
+    # the observer camera. Here we pre-pose the arms with a mild shoulder abduct
+    # + shoulder lift + elbow bend so the two arms naturally spread open.
+    # Joint order: [j1, j2, j3, j4, j5, j6] (6-DoF arm).
+    #  j1: shoulder yaw   (positive -> outward abduction on each side)
+    #  j2: shoulder pitch (sign depends on URDF; tune after first rollout)
+    #  j3: elbow          (positive -> bend)
+    #  j4,j5,j6: wrist
+    DEFAULT_LEFT_HOME = [0.30, -0.40, 0.80, 0.0, 0.80, 0.0]
+    DEFAULT_RIGHT_HOME = [-0.30, -0.40, 0.80, 0.0, 0.80, 0.0]
+
     def setup_demo(self, **kwargs):
         super()._init_task_env_(**kwargs)
         # Optional per-task overrides from task_config.
@@ -53,6 +66,20 @@ class random_dance(Base_Task):
         # deceleration between key-frames at all).
         self._dance_cruise_ratio = float(dance_cfg.get("cruise_ratio", 1.0))
         self._dance_cruise_ratio = min(max(self._dance_cruise_ratio, 0.05), 1.0)
+
+        # Dance home: explicit yaml override > built-in default > embodiment homestate.
+        n_left = len(self.robot.left_arm_joints)
+        n_right = len(self.robot.right_arm_joints)
+        left_home_cfg = dance_cfg.get("left_home", None)
+        right_home_cfg = dance_cfg.get("right_home", None)
+        if left_home_cfg is None:
+            left_home_cfg = self.DEFAULT_LEFT_HOME if n_left == len(self.DEFAULT_LEFT_HOME) \
+                else list(self.robot.left_homestate)
+        if right_home_cfg is None:
+            right_home_cfg = self.DEFAULT_RIGHT_HOME if n_right == len(self.DEFAULT_RIGHT_HOME) \
+                else list(self.robot.right_homestate)
+        self._dance_left_home = np.asarray(left_home_cfg, dtype=np.float64)
+        self._dance_right_home = np.asarray(right_home_cfg, dtype=np.float64)
 
     # ------------------------------------------------------------------
     # Scene objects
@@ -178,8 +205,10 @@ class random_dance(Base_Task):
         self._take_picture()
 
     def play_once(self):
-        left_home = np.array(self.robot.left_homestate, dtype=np.float64)
-        right_home = np.array(self.robot.right_homestate, dtype=np.float64)
+        # Use the task-level "dance home" (not the embodiment homestate) as the
+        # sampling centre so the arms start in a spread-open pose.
+        left_home = self._dance_left_home.astype(np.float64, copy=True)
+        right_home = self._dance_right_home.astype(np.float64, copy=True)
 
         # Current gripper values (normalised [0,1]).
         left_grip = float(self.robot.get_left_gripper_val() or 0.0)
