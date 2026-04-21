@@ -1,5 +1,7 @@
 render_freq: 0
-episode_num: 50
+# Number of episodes collected per run. Lower this while debugging (e.g. 3),
+# raise it (e.g. 50) when actually producing data for training.
+episode_num: 3
 use_seed: false
 save_freq: 15
 embodiment: [aloha-agilex]
@@ -35,10 +37,12 @@ save_path: ./data
 clear_cache_freq: 5
 collect_data: true
 eval_video_log: true
-# Random-dance specific knobs (consumed by envs/random_dance.py)
+# Random-dance specific knobs (consumed by envs/random_dance.py).
+# Larger `arm_delta` -> bigger dance amplitude; `hold_substeps` must also grow,
+# otherwise the drive target is reached only partially within each key-frame.
 random_dance:
   n_steps: 30
-  arm_delta: 0.35
-  gripper_toggle_p: 0.3
-  hold_substeps: 40
-  save_every: 5
+  arm_delta: 1.2        # radians (~69 deg) around home state per joint
+  gripper_toggle_p: 0.2
+  hold_substeps: 80     # physics substeps spent converging to each key-frame
+  save_every: 8         # save one observation every N substeps

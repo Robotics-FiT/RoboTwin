@@ -68,11 +68,37 @@ class random_dance(Base_Task):
     # ------------------------------------------------------------------
     # Dance logic
     # ------------------------------------------------------------------
-    def _sample_arm_targets(self, home_arm):
-        """Sample a random target joint vector uniformly in [home-delta, home+delta]."""
+    def _sample_arm_targets(self, home_arm, arm_tag):
+        """Sample a random target joint vector around the home state.
+
+        The raw uniform sample in ``[home-delta, home+delta]`` is additionally
+        clipped to each joint's physical limit (with a small safety margin),
+        so that large ``arm_delta`` values still produce reachable -- and
+        therefore actually moving -- targets.
+        """
         home_arm = np.asarray(home_arm, dtype=np.float64)
         delta = self._dance_arm_delta
-        return home_arm + np.random.uniform(-delta, delta, size=home_arm.shape)
+        raw = home_arm + np.random.uniform(-delta, delta, size=home_arm.shape)
+
+        joint_lst = self.robot.left_arm_joints if arm_tag == "left" else self.robot.right_arm_joints
+        limits_low = np.full_like(home_arm, -np.inf)
+        limits_high = np.full_like(home_arm, np.inf)
+        try:
+            for j_idx, joint in enumerate(joint_lst):
+                lim = joint.get_limits()
+                # `get_limits()` returns shape (1, 2); robust to ndarray / list.
+                lim = np.asarray(lim).reshape(-1, 2)
+                if lim.size >= 2 and np.all(np.isfinite(lim[0])):
+                    limits_low[j_idx] = lim[0, 0]
+                    limits_high[j_idx] = lim[0, 1]
+        except Exception:
+            pass
+        # Leave a 5% safety margin inside the hard limits.
+        span = np.where(np.isfinite(limits_high - limits_low),
+                        (limits_high - limits_low) * 0.05, 0.0)
+        safe_low = limits_low + span
+        safe_high = limits_high - span
+        return np.clip(raw, safe_low, safe_high)
 
     def _drive_to_keyframe(self, left_arm_target, right_arm_target,
                            left_gripper_target, right_gripper_target):
@@ -113,8 +139,8 @@ class random_dance(Base_Task):
             self.left_joint_path = []
             self.right_joint_path = []
             for _ in range(self._dance_n_steps):
-                l_arm = self._sample_arm_targets(left_home)
-                r_arm = self._sample_arm_targets(right_home)
+                l_arm = self._sample_arm_targets(left_home, "left")
+                r_arm = self._sample_arm_targets(right_home, "right")
 
                 if np.random.rand() < self._dance_gripper_toggle_p:
                     left_grip = float(np.random.uniform(0.0, 1.0))
