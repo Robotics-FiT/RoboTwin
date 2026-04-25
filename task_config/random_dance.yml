@@ -66,5 +66,5 @@ random_dance:
   # observer camera. Joint order: [j1 shoulder-yaw, j2 shoulder-pitch,
   # j3 elbow, j4, j5 wrist-pitch, j6]. Comment out to fall back to the
   # built-in defaults in envs/random_dance.py.
-  left_home:  [ 0.30, -0.40, 0.80, 0.0, 0.80, 0.0]
-  right_home: [-0.30, -0.40, 0.80, 0.0, 0.80, 0.0]
+  left_home:  [ 0.30, 0.40, 0.80, 0.0, 0.80, 0.0]
+  right_home: [-0.30, 0.40, 0.80, 0.0, 0.80, 0.0]

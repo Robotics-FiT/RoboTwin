@@ -209,13 +209,13 @@ def _main_dispatcher() -> int:
     # -----------------------------------------------------------------------
     # Level 3: RT + OptiX (in subprocess)
     # -----------------------------------------------------------------------
-    section("[L3] ray tracing + OptiX (in subprocess)")
-    optix_ok = _run_rt_in_subprocess("optix")
+    # section("[L3] ray tracing + OptiX (in subprocess)")
+    # optix_ok = _run_rt_in_subprocess("optix")
 
     # -----------------------------------------------------------------------
     # Level 4: RT + OIDN (in subprocess)
     # -----------------------------------------------------------------------
-    section("[L4] ray tracing + OIDN (in subprocess)")
+    section("[L3] ray tracing + OIDN (in subprocess)")
     oidn_ok = _run_rt_in_subprocess("oidn")
 
     # -----------------------------------------------------------------------
