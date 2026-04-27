@@ -8,3 +8,4 @@ from .actor_utils import *
 from .transforms import *
 from .pkl2hdf5 import *
 from .images_to_video import *
+from .hdri_light import estimate_sun_from_hdri, estimate_ground_color_from_hdri

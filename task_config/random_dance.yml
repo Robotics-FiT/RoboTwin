@@ -1,7 +1,7 @@
 render_freq: 0
 # Number of episodes collected per run. Lower this while debugging (e.g. 3),
 # raise it (e.g. 50) when actually producing data for training.
-episode_num: 3
+episode_num: 4
 use_seed: false
 save_freq: 15
 embodiment: [aloha-agilex]
@@ -18,14 +18,27 @@ domain_randomization:
   # wall, which gives third-person / augmentation cameras an unobstructed
   # view of the robot and tabletop.
   remove_wall: true
+
+# Drop a large, tinted flat plane at z=0 so table/robot/objects cast visible
+# shadows onto "the ground" even though the real background comes from the
+# HDRI environment map. Colour is auto-sampled from the HDRI's horizon band
+# so the plane blends with the HDRI's own ground (e.g. grass for the
+# grasslands HDRI).
+shadow_catcher: false
+# Optional overrides:
+# shadow_catcher_color: [0.28, 0.30, 0.18]   # explicit RGB in [0,1]
+# shadow_catcher_size: 10.0                  # half-size of the square plane
+# shadow_catcher_z_bias: 0.001               # lift above z=0 to dodge z-fighting
 camera:
   head_camera_type: D435
   wrist_camera_type: D435
   collect_head_camera: true
   collect_wrist_camera: true
-  # "default" -> head_camera, "observer" -> fixed third-person, "random" -> per-episode
-  # random pose on a partial sphere around the tabletop (good for visual augmentation).
-  third_person_view: random
+  # "default" -> head_camera, "observer" -> fixed third-person with the table
+  # between camera and robot (great for demos/viz), "random" -> per-episode
+  # random pose on a partial sphere around the tabletop (good for visual
+  # augmentation).
+  third_person_view: observer
   # Knobs for the random third-person view (only used when third_person_view == random).
   random_view:
     azimuth_range: [-90.0, 90.0]      # deg; 0 = robot front, +/-90 = robot side

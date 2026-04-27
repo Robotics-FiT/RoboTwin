@@ -92,7 +92,9 @@ class Base_Task(gym.Env):
         self.plan_success = True
         self.step_lim = None
         self.fix_gripper = False
-        self.setup_scene()
+        # Forward the task-config kwargs so ``setup_scene`` can read
+        # ``shadow_catcher``, ``environment_map`` etc. straight from the yaml.
+        self.setup_scene(**kwags)
 
         self.left_js = None
         self.right_js = None
@@ -227,7 +229,64 @@ class Base_Task(gym.Env):
         # set simulation timestep
         self.scene.set_timestep(kwargs.get("timestep", 1 / 250))
         # add ground to scene
-        self.scene.add_ground(kwargs.get("ground_height", 0))
+        # ``render_ground`` toggles only the visual plane; physics collision
+        # stays on so objects can still fall onto / bounce off the floor. We
+        # default to False because the HDRI environment map provides the
+        # surround; a big flat white/grey ground plane would otherwise cover
+        # the bottom half of the image and hide the HDRI.
+        self.scene.add_ground(
+            kwargs.get("ground_height", 0),
+            render=kwargs.get("render_ground", False),
+        )
+        # ----- shadow catcher ---------------------------------------------
+        # The HDRI provides only image-based lighting; SAPIEN won't "paint"
+        # shadows onto the HDRI itself because the background is not an
+        # actor. To get visible shadows on the floor we drop a flat, tinted
+        # visual-only plane a hair above z=0. Its diffuse colour is sampled
+        # from the HDRI's below-horizon band so it blends with the HDRI's
+        # own ground (e.g. the grasslands below the sky), and shadow-casting
+        # lights darken the plane where they are occluded.
+        # Disabled by default outside of the dedicated standalone scripts --
+        # production tasks put the robot on a table, and the table is already
+        # a fine shadow receiver.
+        self._shadow_catcher = None
+        if kwargs.get("shadow_catcher", False):
+            try:
+                from .utils import estimate_ground_color_from_hdri
+                catcher_color = kwargs.get("shadow_catcher_color")
+                if catcher_color is None:
+                    default_env_map_for_color = os.path.join(
+                        parent_directory, "..", "assets", "scenes", "HDRIs",
+                        "grasslands_sunset_4k.exr",
+                    )
+                    _em = kwargs.get("environment_map", default_env_map_for_color)
+                    if isinstance(_em, str):
+                        _em_path = _em if os.path.isabs(_em) else os.path.normpath(
+                            os.path.join(parent_directory, "..", _em))
+                        col = estimate_ground_color_from_hdri(_em_path)
+                        catcher_color = col.tolist() if col is not None else [0.3, 0.3, 0.3]
+                    else:
+                        catcher_color = [0.3, 0.3, 0.3]
+
+                catcher_size = kwargs.get("shadow_catcher_size", 10.0)
+                catcher_z = kwargs.get("ground_height", 0) + kwargs.get("shadow_catcher_z_bias", 0.001)
+                builder = self.scene.create_actor_builder()
+                mat = self.renderer.create_material()
+                mat.set_base_color([float(catcher_color[0]), float(catcher_color[1]),
+                                    float(catcher_color[2]), 1.0])
+                mat.set_metallic(0.0)
+                # High roughness -> fully diffuse, no noticeable specular on
+                # the plane, keeping the visual reading "this is just ground".
+                mat.set_roughness(1.0)
+                builder.add_box_visual(
+                    half_size=[catcher_size, catcher_size, 0.001],
+                    material=mat,
+                )
+                self._shadow_catcher = builder.build_static(name="shadow_catcher")
+                self._shadow_catcher.set_pose(sapien.Pose(p=[0.0, 0.0, catcher_z]))
+            except Exception as e:
+                print(f"\033[93m[warn] failed to add shadow catcher: {e}\033[0m")
+        # ------------------------------------------------------------------
         # set default physical material
         self.scene.default_physical_material = self.scene.create_physical_material(
             kwargs.get("static_friction", 0.5),
@@ -235,12 +294,96 @@ class Base_Task(gym.Env):
             kwargs.get("restitution", 0),
         )
         # give some white ambient light of moderate intensity
-        self.scene.set_ambient_light(kwargs.get("ambient_light", [0.5, 0.5, 0.5]))
+        # Kept low-ish (0.25 default) so that the HDRI-derived directional
+        # "sun" light still produces a strong lit/unlit contrast -- if the
+        # ambient term is too high, shadows get washed out.
+        self.scene.set_ambient_light(kwargs.get("ambient_light", [0.25, 0.25, 0.25]))
+
+        # Environment map (HDRI skybox + image-based lighting). Replaces the
+        # default solid-colour skybox, both for what the camera sees when it
+        # looks past the scene geometry and for the IBL contribution that the
+        # ray tracer integrates against. Accepts either an equirectangular HDRI
+        # (e.g. .exr / .hdr) or a pre-built cubemap.
+        #   - ``environment_map``: path (str) or ``sapien.render.RenderCubemap``.
+        #     Resolved relative to the repo root when a relative path is given.
+        #     Set to ``None`` / empty string to explicitly disable.
+        # Defaults to the grasslands HDRI we ship under assets/scenes/HDRIs/.
+        default_env_map = os.path.join(
+            parent_directory, "..", "assets", "scenes", "HDRIs",
+            "grasslands_sunset_4k.exr",
+        )
+        env_map = kwargs.get("environment_map", default_env_map)
+        loaded_env_map_path = None  # remember for later (sun extraction)
+        if env_map:
+            try:
+                if isinstance(env_map, str) and not os.path.isabs(env_map):
+                    env_map_path = os.path.normpath(os.path.join(parent_directory, "..", env_map))
+                else:
+                    env_map_path = env_map
+                if isinstance(env_map_path, str) and not os.path.exists(env_map_path):
+                    print(f"\033[93m[warn] environment map not found: {env_map_path}; "
+                          f"falling back to default skybox.\033[0m")
+                else:
+                    self.scene.set_environment_map(env_map_path)
+                    if isinstance(env_map_path, str):
+                        loaded_env_map_path = env_map_path
+            except Exception as e:
+                print(f"\033[93m[warn] failed to set environment map ({env_map}): {e}\033[0m")
+
         # default enable shadow unless specified otherwise
         shadow = kwargs.get("shadow", True)
-        # default spotlight angle and intensity
-        direction_lights = kwargs.get("direction_lights", [[[0, 0.5, -1], [0.5, 0.5, 0.5]]])
+        # Shadow-map parameters for directional lights. Low-altitude suns
+        # (e.g. sunset HDRIs) cast very long shadows, so default to a
+        # comfortably large orthographic frustum. These can be overridden per
+        # task via kwargs if needed.
+        shadow_scale = kwargs.get("shadow_scale", 5.0)
+        shadow_near = kwargs.get("shadow_near", -10.0)
+        shadow_far = kwargs.get("shadow_far", 20.0)
+        shadow_map_size = kwargs.get("shadow_map_size", 4096)
         self.direction_light_lst = []
+
+        # ---- HDRI-derived "sun" light (separate from the user's
+        #      direction_lights list so ``random_light`` does NOT randomise
+        #      its colour -- we want it to stay consistent with the HDRI
+        #      background so shadows line up visually.) ------------------
+        # When ``hdri_sun_shadow`` is True (default) and we successfully loaded
+        # an equirectangular HDRI, we analyse the brightest blob in the HDRI
+        # and spawn a directional light with that direction + colour. SAPIEN's
+        # path tracer by itself integrates the HDRI as diffuse IBL and will not
+        # cast a hard shadow, so this extra light is what gives you crisp,
+        # HDRI-consistent shadows on the tabletop / floor. Users can disable
+        # with ``hdri_sun_shadow=False``.
+        self.hdri_sun_light = None
+        if kwargs.get("hdri_sun_shadow", True) and loaded_env_map_path is not None:
+            try:
+                from .utils import estimate_sun_from_hdri
+                sun = estimate_sun_from_hdri(
+                    loaded_env_map_path,
+                    intensity_scale=kwargs.get("hdri_sun_intensity", 4.0),
+                )
+                if sun is not None:
+                    sun_dir, sun_col = sun
+                    self.hdri_sun_light = self.scene.add_directional_light(
+                        sun_dir.tolist(), sun_col.tolist(),
+                        shadow=shadow,
+                        shadow_scale=shadow_scale,
+                        shadow_near=shadow_near,
+                        shadow_far=shadow_far,
+                        shadow_map_size=shadow_map_size,
+                    )
+            except Exception as e:
+                print(f"\033[93m[warn] could not extract HDRI sun ({e}); "
+                      f"falling back to default directional light.\033[0m")
+
+        # ---- User-supplied / default directional lights --------------------
+        # Skip the built-in default entirely when the HDRI sun is already
+        # providing the key light, otherwise we'd double-shadow the scene
+        # with a generic grey light whose direction has nothing to do with
+        # the HDRI.
+        if self.hdri_sun_light is not None:
+            direction_lights = kwargs.get("direction_lights", [])
+        else:
+            direction_lights = kwargs.get("direction_lights", [[[0, 0.5, -1], [0.5, 0.5, 0.5]]])
         for direction_light in direction_lights:
             if self.random_light:
                 direction_light[1] = [
@@ -249,9 +392,24 @@ class Base_Task(gym.Env):
                     np.random.rand(),
                 ]
             self.direction_light_lst.append(
-                self.scene.add_directional_light(direction_light[0], direction_light[1], shadow=shadow))
+                self.scene.add_directional_light(
+                    direction_light[0], direction_light[1],
+                    shadow=shadow,
+                    shadow_scale=shadow_scale,
+                    shadow_near=shadow_near,
+                    shadow_far=shadow_far,
+                    shadow_map_size=shadow_map_size,
+                ))
         # default point lights position and intensity
-        point_lights = kwargs.get("point_lights", [[[1, 0, 1.8], [1, 1, 1]], [[-1, 0, 1.8], [1, 1, 1]]])
+        # Kept relatively weak (0.25 white) because HDRI IBL + HDRI-derived
+        # directional sun already supply most of the illumination; strong
+        # point lights here would wash out the HDRI sun's hard shadows.
+        # Override via kwargs (e.g. ``point_lights=[[pos, colour], ...]``)
+        # when a task needs specific fill lighting.
+        point_lights = kwargs.get(
+            "point_lights",
+            [[[1, 0, 1.8], [0.25, 0.25, 0.25]], [[-1, 0, 1.8], [0.25, 0.25, 0.25]]],
+        )
         self.point_light_lst = []
         for point_light in point_lights:
             if self.random_light:
@@ -432,6 +590,10 @@ class Base_Task(gym.Env):
         if self.crazy_random_light:
             for renderColor in self.point_light_lst:
                 renderColor.set_color([np.random.rand(), np.random.rand(), np.random.rand()])
+            # ``direction_light_lst`` intentionally excludes the HDRI sun
+            # light (stored separately as ``self.hdri_sun_light``) so the
+            # crazy-random colour jitter does not break its alignment with
+            # the HDRI background.
             for renderColor in self.direction_light_lst:
                 renderColor.set_color([np.random.rand(), np.random.rand(), np.random.rand()])
             now_ambient_light = self.scene.ambient_light

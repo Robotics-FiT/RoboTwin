@@ -13,6 +13,7 @@ import json
 import traceback
 import os
 import time
+import numpy as np
 from argparse import ArgumentParser
 
 current_file_path = os.path.abspath(__file__)
@@ -108,6 +109,24 @@ def run(TASK_ENV, args):
 
     print(f"Task Name: \033[34m{args['task_name']}\033[0m")
 
+    # Per-episode timing buckets. Populated during the two stages below and
+    # printed as a summary at the end of ``run``. Times are wall-clock
+    # seconds measured with ``time.perf_counter()`` so we capture whatever
+    # the OS scheduler, GPU, and disk actually took.
+    timings = {
+        "physics_episodes": [],   # Stage 1: physics-only sim (seed search)
+        "render_episodes": [],    # Stage 2: whole episode including render
+        "merge_video_ep": [],     # Stage 2 sub: pkl->hdf5 + mp4 encode only
+    }
+
+    def _fmt_stats(name, series):
+        if not series:
+            return f"  {name:24s}  (no samples)"
+        arr = np.asarray(series, dtype=np.float64)
+        return (f"  {name:24s}  n={len(arr):3d}  "
+                f"total={arr.sum():8.2f}s  mean={arr.mean():6.2f}s  "
+                f"min={arr.min():6.2f}s  max={arr.max():6.2f}s")
+
     # =========== Collect Seed ===========
     os.makedirs(args["save_path"], exist_ok=True)
 
@@ -125,6 +144,9 @@ def run(TASK_ENV, args):
             print(f"Exist seed file, Start from: {epid} / {suc_num}")
 
         while suc_num < args["episode_num"]:
+            # ----- Stage 1: physics-only simulation for one episode -----
+            ep_t0 = time.perf_counter()
+            episode_ok = False
             try:
                 TASK_ENV.setup_demo(now_ep_num=suc_num, seed=epid, **args)
                 TASK_ENV.play_once()
@@ -134,6 +156,7 @@ def run(TASK_ENV, args):
                     seed_list.append(epid)
                     TASK_ENV.save_traj_data(suc_num)
                     suc_num += 1
+                    episode_ok = True
                 else:
                     print(f"simulate data episode {suc_num} fail! (seed = {epid})")
                     fail_num += 1
@@ -165,6 +188,12 @@ def run(TASK_ENV, args):
                 if args["render_freq"]:
                     TASK_ENV.viewer.close()
                 time.sleep(1)
+
+            # Only count time for episodes that produced a usable trajectory
+            # -- failed ones are noisy (variable exception-handling time) and
+            # not what we want to characterise.
+            if episode_ok:
+                timings["physics_episodes"].append(time.perf_counter() - ep_t0)
 
             epid += 1
 
@@ -202,6 +231,9 @@ def run(TASK_ENV, args):
         for episode_idx in range(st_idx, args["episode_num"]):
             print(f"\033[34mTask name: {args['task_name']}\033[0m")
 
+            # ----- Stage 2: trajectory replay + rendering + video encode -----
+            ep_t0 = time.perf_counter()
+
             TASK_ENV.setup_demo(now_ep_num=episode_idx, seed=seed_list[episode_idx], **args)
 
             traj_data = TASK_ENV.load_tran_data(episode_idx)
@@ -225,12 +257,37 @@ def run(TASK_ENV, args):
                 json.dump(info_db, file, ensure_ascii=False, indent=4)
 
             TASK_ENV.close_env(clear_cache=((episode_idx + 1) % clear_cache_freq == 0))
+
+            # Measure the hdf5/mp4 merge separately so we can tell whether the
+            # bottleneck is the renderer itself or the post-processing.
+            merge_t0 = time.perf_counter()
             TASK_ENV.merge_pkl_to_hdf5_video()
+            timings["merge_video_ep"].append(time.perf_counter() - merge_t0)
+
             TASK_ENV.remove_data_cache()
             assert TASK_ENV.check_success(), "Collect Error"
 
+            timings["render_episodes"].append(time.perf_counter() - ep_t0)
+            print(f"[timing] episode {episode_idx}: render+save "
+                  f"{timings['render_episodes'][-1]:.2f}s  "
+                  f"(of which merge+mp4 {timings['merge_video_ep'][-1]:.2f}s)")
+
         command = f"cd description && bash gen_episode_instructions.sh {args['task_name']} {args['task_config']} {args['language_num']}"
         os.system(command)
+
+    # ========== Final timing summary ==========
+    print("\n\033[96m" + "=" * 70 + "\033[0m")
+    print("\033[96m[timing] per-episode wall-clock summary\033[0m")
+    print("\033[96m" + "=" * 70 + "\033[0m")
+    print(_fmt_stats("Stage 1  physics-only",    timings["physics_episodes"]))
+    print(_fmt_stats("Stage 2  render + save",   timings["render_episodes"]))
+    print(_fmt_stats("  of which merge+mp4",     timings["merge_video_ep"]))
+    if timings["physics_episodes"] and timings["render_episodes"]:
+        p = float(np.mean(timings["physics_episodes"]))
+        r = float(np.mean(timings["render_episodes"]))
+        print(f"\n  render/physics ratio (mean): {r / max(p, 1e-6):.2f}x  "
+              f"=> rendering is {'the' if r > p else 'not the'} bottleneck.")
+    print("\033[96m" + "=" * 70 + "\033[0m\n")
 
 
 if __name__ == "__main__":
