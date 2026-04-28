@@ -95,7 +95,7 @@ def _pixel_to_world_dir(u: float, v: float, width: int, height: int) -> np.ndarr
 def estimate_sun_from_hdri(
     hdri_path: str,
     max_elevation_deg: float = 85.0,
-    min_elevation_deg: float = 2.0,
+    min_elevation_deg: float = 20.0,
     color_clip: float = 10.0,
     intensity_scale: float = 1.5,
     downscale_max_side: int = 1024,
@@ -122,9 +122,13 @@ def estimate_sun_from_hdri(
          fall back to a luminance-weighted centroid of the brightest
          ``diffuse_fallback_percentile`` percentile.
 
-    Low-elevation suns are kept (``min_elevation_deg`` defaults to 2 deg)
-    because sunsets are a common case; only below-horizon values are clipped
-    up so SAPIEN gets a sensible direction.
+    Low-elevation suns are *clamped up* to ``min_elevation_deg`` (default
+    20 deg) so that the resulting shadows remain visually meaningful on a
+    tabletop scene. A nearly-horizontal sun (e.g. a sunset HDRI whose sun
+    sits at 3 deg elevation) would cast shadows that graze parallel to the
+    floor and produce almost no contrast under the robot -- not useful for
+    data augmentation. Override ``min_elevation_deg`` if you want the
+    physically correct direction back.
 
     Returns ``None`` when the HDRI cannot be read.
     """

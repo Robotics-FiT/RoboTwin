@@ -22,9 +22,23 @@ def get_rotated_hdri_path(file_path, yaw_deg):
     读取 equirectangular HDRI (.exr)，在水平方向按 yaw 角度做 np.roll 旋转，
     然后写到 /tmp 下的临时文件（不占额外磁盘），供 SAPIEN 加载。
     使用 cv2 读/写 EXR，避免 imageio 的 pyav 插件问题。
+
+    文件名中包含 pid 以及当前时间戳（纳秒），避免 SAPIEN 内部按路径做纹理缓存
+    导致新的环境贴图被忽略。每个 episode 生成时会先删掉上次的临时文件。
     """
-    import tempfile
-    temp_path = os.path.join(tempfile.gettempdir(), f"rotated_hdri_{os.getpid()}.exr")
+    import tempfile, time
+    tmp_dir = tempfile.gettempdir()
+    # 清掉当前进程上次留下的 rotated_hdri_<pid>_*.exr，避免在 /tmp 中堆积。
+    try:
+        for f in os.listdir(tmp_dir):
+            if f.startswith(f"rotated_hdri_{os.getpid()}_") and f.endswith(".exr"):
+                try:
+                    os.remove(os.path.join(tmp_dir, f))
+                except OSError:
+                    pass
+    except OSError:
+        pass
+    temp_path = os.path.join(tmp_dir, f"rotated_hdri_{os.getpid()}_{time.time_ns()}.exr")
     # IMREAD_UNCHANGED 保留原始 float32 及通道数 (含 alpha)
     hdri = cv2.imread(file_path, cv2.IMREAD_UNCHANGED)
     if hdri is None:
@@ -137,6 +151,8 @@ class Camera:
             yaw_deg = np.random.uniform(0, 360)
             rotated_path = get_rotated_hdri_path(hdri_path, yaw_deg)
             scene.set_environment_map(rotated_path)
+            print(f"\033[96m[hdri]\033[0m yaw={yaw_deg:6.2f}deg  "
+                  f"src={os.path.basename(hdri_path)}  -> {rotated_path}")
 
         # sensor_mount_actor = scene.create_actor_builder().build_kinematic()
 

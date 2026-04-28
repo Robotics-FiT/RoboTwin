@@ -297,11 +297,11 @@ class Base_Task(gym.Env):
             kwargs.get("dynamic_friction", 0.5),
             kwargs.get("restitution", 0),
         )
-        # give some white ambient light of moderate intensity
-        # Kept low-ish (0.25 default) so that the HDRI-derived directional
-        # "sun" light still produces a strong lit/unlit contrast -- if the
-        # ambient term is too high, shadows get washed out.
-        self.scene.set_ambient_light(kwargs.get("ambient_light", [0.25, 0.25, 0.25]))
+        # Ambient light: default to fully off. HDRI IBL already provides
+        # ample soft fill illumination for diffuse and specular components,
+        # so any extra ambient term would just wash out shadows. Still
+        # overridable via the ``ambient_light`` kwarg.
+        self.scene.set_ambient_light(kwargs.get("ambient_light", [0.0, 0.0, 0.0]))
 
         # Environment map (HDRI skybox + image-based lighting). Replaces the
         # default solid-colour skybox, both for what the camera sees when it
@@ -366,7 +366,9 @@ class Base_Task(gym.Env):
                 from .utils import estimate_sun_from_hdri
                 sun = estimate_sun_from_hdri(
                     loaded_env_map_path,
-                    intensity_scale=kwargs.get("hdri_sun_intensity", 4.0),
+                    intensity_scale=kwargs.get("hdri_sun_intensity", 8.0),
+                    min_elevation_deg=kwargs.get("hdri_sun_min_elevation_deg", 20.0),
+                    max_elevation_deg=kwargs.get("hdri_sun_max_elevation_deg", 85.0),
                 )
                 if sun is not None:
                     sun_dir, sun_col = sun
@@ -407,21 +409,54 @@ class Base_Task(gym.Env):
                     shadow_far=shadow_far,
                     shadow_map_size=shadow_map_size,
                 ))
-        # default point lights position and intensity
-        # Kept relatively weak (0.25 white) because HDRI IBL + HDRI-derived
-        # directional sun already supply most of the illumination; strong
-        # point lights here would wash out the HDRI sun's hard shadows.
-        # Override via kwargs (e.g. ``point_lights=[[pos, colour], ...]``)
-        # when a task needs specific fill lighting.
-        point_lights = kwargs.get(
-            "point_lights",
-            [[[1, 0, 1.8], [0.25, 0.25, 0.25]], [[-1, 0, 1.8], [0.25, 0.25, 0.25]]],
-        )
+        # Point lights: default to none. The HDRI + HDRI-derived directional
+        # sun together cover both the IBL fill and the hard-shadow key light;
+        # adding default point lights would re-light the shadow regions and
+        # dilute the HDRI sun's shadow contrast. Users can still opt-in via
+        # ``point_lights=[[pos, colour], ...]`` in the task config.
+        point_lights = kwargs.get("point_lights", [])
         self.point_light_lst = []
         for point_light in point_lights:
             if self.random_light:
                 point_light[1] = [np.random.rand(), np.random.rand(), np.random.rand()]
             self.point_light_lst.append(self.scene.add_point_light(point_light[0], point_light[1], shadow=shadow))
+
+        # ---- Lighting summary (for quick sanity check) ---------------------
+        amb = self.scene.ambient_light
+        print("\033[96m[lighting]\033[0m ambient = "
+              f"[{amb[0]:.3f}, {amb[1]:.3f}, {amb[2]:.3f}]")
+        print(f"\033[96m[lighting]\033[0m environment map: "
+              f"{loaded_env_map_path if loaded_env_map_path else '(none)'}")
+        if self.hdri_sun_light is not None:
+            try:
+                d = self.hdri_sun_light.direction
+                c = self.hdri_sun_light.color
+                print(f"\033[96m[lighting]\033[0m HDRI sun dir=[{d[0]:+.2f}, {d[1]:+.2f}, {d[2]:+.2f}]"
+                      f"  color=[{c[0]:.2f}, {c[1]:.2f}, {c[2]:.2f}]  shadow=True")
+            except Exception:
+                print("\033[96m[lighting]\033[0m HDRI sun light present")
+        else:
+            print("\033[96m[lighting]\033[0m HDRI sun: (none)")
+        print(f"\033[96m[lighting]\033[0m extra directional lights: {len(self.direction_light_lst)}")
+        for i, dl in enumerate(self.direction_light_lst):
+            try:
+                d = dl.direction
+                c = dl.color
+                print(f"           [{i}] dir=[{d[0]:+.2f}, {d[1]:+.2f}, {d[2]:+.2f}]"
+                      f"  color=[{c[0]:.2f}, {c[1]:.2f}, {c[2]:.2f}]")
+            except Exception:
+                pass
+        print(f"\033[96m[lighting]\033[0m point lights: {len(self.point_light_lst)}")
+        for i, pl in enumerate(self.point_light_lst):
+            try:
+                p = pl.position
+                c = pl.color
+                print(f"           [{i}] pos=[{p[0]:+.2f}, {p[1]:+.2f}, {p[2]:+.2f}]"
+                      f"  color=[{c[0]:.2f}, {c[1]:.2f}, {c[2]:.2f}]")
+            except Exception:
+                pass
+        print(f"\033[96m[lighting]\033[0m shadow params: "
+              f"scale={shadow_scale}  near={shadow_near}  far={shadow_far}  map_size={shadow_map_size}")
 
         # initialize viewer with camera position and orientation
         if self.render_freq:
