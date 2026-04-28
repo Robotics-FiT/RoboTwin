@@ -126,7 +126,11 @@ class Base_Task(gym.Env):
 
         self.create_table_and_wall(table_xy_bias=table_xy_bias, table_height=0.74)
         self.load_robot(**kwags)
-        self.load_camera(**kwags)
+        # 传递 HDRI 路径（如果有）给 load_camera。
+        # setup_scene 已经把实际加载的 HDRI 路径记录在 self.environment_map_path，
+        # 优先用它；否则退回到 kwags 的 environment_map。
+        hdri_path = getattr(self, "environment_map_path", None) or kwags.get("environment_map", None)
+        self.load_camera(hdri_path=hdri_path, **kwags)
         self.robot.move_to_homestate()
 
         render_freq = self.render_freq
@@ -329,6 +333,9 @@ class Base_Task(gym.Env):
                         loaded_env_map_path = env_map_path
             except Exception as e:
                 print(f"\033[93m[warn] failed to set environment map ({env_map}): {e}\033[0m")
+
+        # 记录实际加载的 HDRI 路径，供 load_camera 在每个 episode 做动态旋转使用。
+        self.environment_map_path = loaded_env_map_path
 
         # default enable shadow unless specified otherwise
         shadow = kwargs.get("shadow", True)
@@ -565,7 +572,7 @@ class Base_Task(gym.Env):
             link: sapien.physx.PhysxArticulationLinkComponent = link
             link.set_mass(1)
 
-    def load_camera(self, **kwags):
+    def load_camera(self, hdri_path=None, **kwags):
         """
         Add cameras and set camera parameters
             - Including four cameras: left, right, front, head.
@@ -576,7 +583,7 @@ class Base_Task(gym.Env):
             random_head_camera_dis=self.random_head_camera_dis,
             **kwags,
         )
-        self.cameras.load_camera(self.scene)
+        self.cameras.load_camera(self.scene, hdri_path=hdri_path)
         self.scene.step()  # run a physical step
         self.scene.update_render()  # sync pose from SAPIEN to renderer
 

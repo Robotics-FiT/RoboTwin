@@ -5,14 +5,37 @@ from PIL import Image, ImageColor
 import open3d as o3d
 import json
 import transforms3d as t3d
+import os
+# 启用 OpenCV 的 OpenEXR 支持（必须在 import cv2 之前设置）。
+os.environ.setdefault("OPENCV_IO_ENABLE_OPENEXR", "1")
 import cv2
 import torch
 import yaml
 import trimesh
 import math
 from .._GLOBAL_CONFIGS import CONFIGS_PATH
-import os
 from sapien.sensor import StereoDepthSensor, StereoDepthSensorConfig
+
+
+def get_rotated_hdri_path(file_path, yaw_deg):
+    """
+    读取 equirectangular HDRI (.exr)，在水平方向按 yaw 角度做 np.roll 旋转，
+    然后写到 /tmp 下的临时文件（不占额外磁盘），供 SAPIEN 加载。
+    使用 cv2 读/写 EXR，避免 imageio 的 pyav 插件问题。
+    """
+    import tempfile
+    temp_path = os.path.join(tempfile.gettempdir(), f"rotated_hdri_{os.getpid()}.exr")
+    # IMREAD_UNCHANGED 保留原始 float32 及通道数 (含 alpha)
+    hdri = cv2.imread(file_path, cv2.IMREAD_UNCHANGED)
+    if hdri is None:
+        raise RuntimeError(f"Failed to read HDRI: {file_path}. "
+                           f"Ensure OPENCV_IO_ENABLE_OPENEXR=1 and the file exists.")
+    width = hdri.shape[1]
+    shift = int(width * (yaw_deg / 360.0))
+    rotated = np.roll(hdri, shift, axis=1)
+    # 保留 float32 精度写出 EXR
+    cv2.imwrite(temp_path, rotated.astype(np.float32))
+    return temp_path
 
 try:
     import pytorch3d.ops as torch3d_ops
@@ -95,7 +118,7 @@ class Camera:
         self.static_camera_info_list = kwags["left_embodiment_config"]["static_camera_list"]
         self.static_camera_num = len(self.static_camera_info_list)
 
-    def load_camera(self, scene):
+    def load_camera(self, scene, hdri_path=None):
         """
         Add cameras and set camera parameters
             - Including four cameras: left, right, front, head.
@@ -107,6 +130,13 @@ class Camera:
 
         with open(camera_config_path, "r", encoding="utf-8") as f:
             camera_args = yaml.load(f.read(), Loader=yaml.FullLoader)
+
+        # 每个 episode 初始化时：如果传入了 HDRI 路径，随机一个 yaw 旋转并重新加载，
+        # 使得同一张底图在不同 episode 中呈现不同朝向的背景与 IBL 光照。
+        if hdri_path and os.path.exists(hdri_path):
+            yaw_deg = np.random.uniform(0, 360)
+            rotated_path = get_rotated_hdri_path(hdri_path, yaw_deg)
+            scene.set_environment_map(rotated_path)
 
         # sensor_mount_actor = scene.create_actor_builder().build_kinematic()
 
@@ -261,7 +291,7 @@ class Camera:
             # tabletop + any objects + the robot's upper body all sit in
             # frame while the camera is mostly horizontal (not a heavy
             # top-down pitch).
-            observer_w, observer_h, observer_fovy_deg = 640, 480, 70
+            observer_w, observer_h, observer_fovy_deg = 1280, 720, 70
             observer_cam_pos = np.array([0.0, 0.65, 1.20])
             observer_cam_forward = np.array([0.0, -1.0, -0.4])
             # Camera-local +Y ("left"). Keep it as world +x so up = fwd x left
