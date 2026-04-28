@@ -101,6 +101,9 @@ def estimate_sun_from_hdri(
     downscale_max_side: int = 1024,
     blob_window_deg: float = 4.0,
     diffuse_fallback_percentile: float = 99.5,
+    auto_intensity: bool = True,
+    base_intensity: float = 1.0,
+    max_intensity: float = 20.0,
 ) -> Optional[Tuple[np.ndarray, np.ndarray]]:
     """Return ``(light_direction, light_color)`` for a SAPIEN directional
     light that approximates the HDRI's strongest light source.
@@ -130,6 +133,18 @@ def estimate_sun_from_hdri(
     data augmentation. Override ``min_elevation_deg`` if you want the
     physically correct direction back.
 
+    Intensity:
+      * ``auto_intensity=True`` (default): pick the directional-light
+        intensity as a function of how much the sun outshines the rest of
+        the sky in *this particular* HDRI. Concretely
+        ``intensity = base_intensity * log1p(sun_lum / sky_lum)``, clipped
+        to ``max_intensity``. This keeps bright noon HDRIs getting a
+        punchy sun and dim overcast / night HDRIs getting barely any
+        directional contribution -- the visual tone of each HDRI is
+        preserved instead of being flattened to a single global scale.
+      * ``auto_intensity=False``: fall back to the old behaviour of
+        normalising the peak channel to exactly ``intensity_scale``.
+
     Returns ``None`` when the HDRI cannot be read.
     """
     if not os.path.exists(hdri_path):
@@ -157,6 +172,11 @@ def estimate_sun_from_hdri(
     p99 = float(np.percentile(lum, 99.0))
     spikey = peak > max(10.0 * p99, 5.0)  # sun >> everything else ~ crisp sun
 
+    # ``sun_lum_repr`` represents the representative luminance of the sun
+    # blob (peak brightness for spikey case, percentile-weighted for
+    # diffuse). ``sky_lum`` represents the rest of the sky (median of the
+    # non-sun pixels). Both feed auto_intensity.
+    sun_lum_repr = peak
     if spikey:
         y0, x0 = np.unravel_index(int(np.argmax(lum)), lum.shape)
         # Convert the chosen pixel's neighbourhood to a small angular window
@@ -190,6 +210,14 @@ def estimate_sun_from_hdri(
 
         phi = (mean_x + 0.5) / W * 2.0 * np.pi - np.pi
         theta = np.pi / 2.0 - (mean_y + 0.5) / H * np.pi
+        # Representative blob luminance: mean of the blob window (more
+        # robust than the single peak pixel which is often a single spike).
+        sun_lum_repr = float(sub_lum.mean())
+        # Sky luminance = median over all pixels *outside* the blob window.
+        blob_mask = np.zeros_like(lum, dtype=bool)
+        blob_mask[y_lo:y_hi, x_lo:x_hi] = True
+        sky_pixels = lum[~blob_mask]
+        sky_lum = float(np.median(sky_pixels)) if sky_pixels.size else float(np.median(lum))
     else:
         thr = np.percentile(lum, diffuse_fallback_percentile)
         mask = lum >= max(thr, 1e-6)
@@ -212,6 +240,12 @@ def estimate_sun_from_hdri(
         mean_color = np.array([
             float(np.sum(img[ys, xs, c] * weights) / w_sum) for c in range(3)
         ], dtype=np.float32)
+        # Diffuse case: use the mean of the top-percentile region as the
+        # sun proxy, and the median of everything else as the sky proxy.
+        sun_lum_repr = float(lum[ys, xs].mean())
+        non_top_mask = lum < max(thr, 1e-6)
+        non_top_pixels = lum[non_top_mask]
+        sky_lum = float(np.median(non_top_pixels)) if non_top_pixels.size else float(np.median(lum))
 
     # Clamp the elevation to avoid degenerate shadows but allow low suns.
     max_t = np.deg2rad(max_elevation_deg)
@@ -225,10 +259,20 @@ def estimate_sun_from_hdri(
     # SAPIEN wants the direction *from* the light *to* the scene.
     light_direction = -sun_dir_world
 
-    # Normalise so the brightest channel sits around 1 * intensity_scale.
+    # ---- Determine the effective intensity ----
+    if auto_intensity:
+        solar_ratio = sun_lum_repr / max(sky_lum, 1e-4)
+        # log1p compresses huge midday ratios; base_intensity lets the user
+        # globally boost / attenuate the result.
+        effective = float(base_intensity) * float(np.log1p(max(solar_ratio, 0.0)))
+        effective = float(np.clip(effective, 0.0, float(max_intensity)))
+    else:
+        effective = float(intensity_scale)
+
+    # Normalise so the brightest channel sits at ``effective``.
     peak_c = float(mean_color.max())
     if peak_c > 1e-4:
-        mean_color = mean_color / peak_c * float(intensity_scale)
+        mean_color = mean_color / peak_c * effective
     mean_color = np.clip(mean_color, 0.0, color_clip).astype(np.float32)
 
     return light_direction, mean_color

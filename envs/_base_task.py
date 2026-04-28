@@ -92,6 +92,37 @@ class Base_Task(gym.Env):
         self.plan_success = True
         self.step_lim = None
         self.fix_gripper = False
+        # ---- HDRI random selection (seeded, reproducible) ----------------
+        # Pick one HDRI for the *entire episode* from a pool of candidate .exr
+        # files, then inject it into ``kwags["environment_map"]`` so the rest
+        # of the pipeline (setup_scene loads it; estimate_sun_from_hdri pulls
+        # the dominant directional light from *that* HDRI; load_camera rotates
+        # it per-episode) works without further changes.
+        #
+        # Accepted yaml keys (all optional):
+        #   environment_map_pool: either a glob pattern (str) matched by
+        #       ``glob.glob``, a directory path (every .exr under it is used),
+        #       or an explicit list of paths. Relative paths are resolved
+        #       against the repo root.
+        #       Default: ``assets/scenes/HDRIs/*.exr``.
+        #   environment_map: if the user *explicitly* sets this, it wins and
+        #       the pool is ignored (back-compat).
+        #
+        # The random choice uses a dedicated RNG seeded from the episode seed
+        # so it is deterministic and does not consume the global np.random.
+        if "environment_map" not in kwags or kwags.get("environment_map") in (None, ""):
+            pool_spec = kwags.get("environment_map_pool",
+                                  "assets/scenes/HDRIs/*.exr")
+            pool_paths = self._resolve_env_map_pool(pool_spec)
+            if pool_paths:
+                _base_seed = int(kwags.get("seed", 0))
+                _hdri_seed = int(np.uint32(_base_seed * 1664525 + 1013904223))
+                _hdri_rng = np.random.default_rng(_hdri_seed)
+                chosen = pool_paths[_hdri_rng.integers(len(pool_paths))]
+                kwags["environment_map"] = chosen
+                print(f"\033[96m[hdri]\033[0m episode {kwags.get('now_ep_num', 0)} "
+                      f"(seed={_base_seed})  -> {os.path.basename(chosen)}  "
+                      f"(pool size = {len(pool_paths)})")
         # Forward the task-config kwargs so ``setup_scene`` can read
         # ``shadow_catcher``, ``environment_map`` etc. straight from the yaml.
         self.setup_scene(**kwags)
@@ -207,6 +238,44 @@ class Base_Task(gym.Env):
 
     def check_success(self):
         pass
+
+    @staticmethod
+    def _resolve_env_map_pool(spec):
+        """Resolve the HDRI pool spec into a sorted, absolute path list.
+
+        ``spec`` accepts one of:
+          * ``str``: a glob pattern (``"assets/scenes/HDRIs/*.exr"``) or a
+            directory path (``"assets/scenes/HDRIs"``). Relative paths are
+            resolved against the repo root.
+          * ``list[str]``: explicit paths, each resolved the same way.
+
+        Missing files are silently skipped. Returns a sorted list of
+        existing absolute paths (sorted for deterministic indexing across
+        machines where ``glob`` ordering might differ).
+        """
+        import glob as _glob
+        repo_root = os.path.normpath(os.path.join(parent_directory, ".."))
+
+        def _abs(p):
+            return p if os.path.isabs(p) else os.path.normpath(os.path.join(repo_root, p))
+
+        if isinstance(spec, (list, tuple)):
+            candidates = [_abs(p) for p in spec if isinstance(p, str)]
+        elif isinstance(spec, str):
+            resolved = _abs(spec)
+            if os.path.isdir(resolved):
+                candidates = _glob.glob(os.path.join(resolved, "*.exr"))
+            elif any(ch in resolved for ch in "*?["):
+                candidates = _glob.glob(resolved)
+            else:
+                candidates = [resolved]
+        else:
+            candidates = []
+
+        # Keep only existing readable files. ``os.path.exists`` follows
+        # symlinks, which is what we want for the ``assets/scenes/HDRIs``
+        # directory that points at the poly_haven collection.
+        return sorted(p for p in candidates if os.path.exists(p))
 
     def setup_scene(self, **kwargs):
         """
@@ -369,6 +438,9 @@ class Base_Task(gym.Env):
                     intensity_scale=kwargs.get("hdri_sun_intensity", 8.0),
                     min_elevation_deg=kwargs.get("hdri_sun_min_elevation_deg", 20.0),
                     max_elevation_deg=kwargs.get("hdri_sun_max_elevation_deg", 85.0),
+                    auto_intensity=kwargs.get("hdri_sun_auto_intensity", True),
+                    base_intensity=kwargs.get("hdri_sun_base_intensity", 1.0),
+                    max_intensity=kwargs.get("hdri_sun_max_intensity", 20.0),
                 )
                 if sun is not None:
                     sun_dir, sun_col = sun
