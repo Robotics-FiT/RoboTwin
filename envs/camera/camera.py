@@ -253,12 +253,22 @@ class Camera:
                 self._sample_random_observer_pose()
             )
         else:
-            # "observer": fixed third-person view in front of the robot.
+            # "observer": fixed third-person view facing the robot *across*
+            # the table, so the table sits between the camera and the robot.
+            # Robot base is around y=-0.65, table centre at y=0, table depth
+            # ~0.7m (front edge at y=+0.35). We stand just past the front
+            # edge, around head height, with a gentle downward tilt so the
+            # tabletop + any objects + the robot's upper body all sit in
+            # frame while the camera is mostly horizontal (not a heavy
+            # top-down pitch).
             observer_w, observer_h, observer_fovy_deg = 640, 480, 70
-            # stand in front of the robot base (robot base is around y=-0.65),
-            # look towards the arms and the tabletop.
-            observer_cam_pos = np.array([0.0, -1.6, 1.4])
-            observer_cam_forward = np.array([0.0, 1.0, -0.5])
+            observer_cam_pos = np.array([0.0, 0.65, 1.20])
+            observer_cam_forward = np.array([0.0, -1.0, -0.4])
+            # Camera-local +Y ("left"). Keep it as world +x so up = fwd x left
+            # ends up with +z component (image stays right-side up). With this
+            # convention, screen-left = world +x, i.e. the robot's left arm
+            # (x>0) lands on the left side of the frame -- the natural
+            # "face-to-face, mirror" reading.
             observer_cam_left = np.array([1.0, 0.0, 0.0])
         self.observer_camera = scene.add_camera(
             name="observer_camera",

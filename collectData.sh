@@ -1,1 +1,1 @@
-bash collect_data.sh random_dance random_dance 2
+bash collect_data.sh random_dance random_dance 3
