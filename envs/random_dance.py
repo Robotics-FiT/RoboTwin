@@ -60,12 +60,6 @@ class random_dance(Base_Task):
         self._dance_gripper_toggle_p = float(dance_cfg.get("gripper_toggle_p", self.DEFAULT_GRIPPER_TOGGLE_P))
         self._dance_hold_substeps = int(dance_cfg.get("hold_substeps", self.DEFAULT_HOLD_SUBSTEPS))
         self._dance_save_every = max(1, int(dance_cfg.get("save_every", self.DEFAULT_SAVE_EVERY)))
-        # Fraction of ``hold_substeps`` used for the *cruise* (linear interp)
-        # phase; the remaining fraction is used to let the PD controller
-        # settle on the target. Set to 1.0 for the smoothest motion (no
-        # deceleration between key-frames at all).
-        self._dance_cruise_ratio = float(dance_cfg.get("cruise_ratio", 1.0))
-        self._dance_cruise_ratio = min(max(self._dance_cruise_ratio, 0.05), 1.0)
 
         # Dance home: explicit yaml override > built-in default > embodiment homestate.
         n_left = len(self.robot.left_arm_joints)
@@ -133,26 +127,46 @@ class random_dance(Base_Task):
         safe_high = limits_high - span
         return np.clip(raw, safe_low, safe_high)
 
-    def _drive_to_keyframe(self, left_arm_prev, left_arm_target,
-                           right_arm_prev, right_arm_target,
-                           left_grip_prev, left_grip_target,
-                           right_grip_prev, right_grip_target):
-        """Drive the robot from the previous key-frame to the given one using
-        a *linear interpolation* reference trajectory with velocity feed-
-        forward, so that consecutive key-frames are stitched into a smooth
-        continuous motion instead of a start-stop-start-stop pattern.
+    def _drive_spline(self, left_waypoints, right_waypoints,
+                      left_grips, right_grips):
+        """Drive both arms through their full list of waypoints using a
+        Catmull-Rom spline (C^1 continuous) so consecutive segments are
+        stitched seamlessly -- no start-stop-start-stop stuttering at the
+        key-frame boundaries.
 
-        The first ``cruise_ratio * hold_substeps`` substeps linearly
-        interpolate the position reference from ``prev`` to ``target`` and
-        feed the matching constant velocity to the PD controller. The
-        remaining substeps hold the final target with zero velocity reference
-        (letting the PD controller settle, avoiding overshoot on the very
-        last key-frame).
+        Inputs
+        ------
+        left_waypoints, right_waypoints : list of np.ndarray, each shape (ndof,)
+            Sequence starting with the current pose and followed by every
+            sampled keyframe. ``len(left_waypoints) == N + 1`` where ``N``
+            is the number of random keyframes.
+        left_grips, right_grips : list of float
+            Same length as ``*_waypoints``. Gripper references are linearly
+            interpolated within each segment -- no spline -- since gripper
+            open/close is a low-DoF binary-ish signal that doesn't need C^1
+            continuity.
+
+        For each of the N segments we run ``hold_substeps`` physics steps,
+        sampling the spline at ``t in [0, 1]``. Because the spline uses
+        Catmull-Rom tangents at every interior waypoint, the robot's joint
+        reference velocity is continuous across the key-frame boundaries.
+
+        At the two ends we duplicate the first / last waypoint to form
+        "virtual" neighbours, which makes the tangents at the first and last
+        real waypoint equal to zero -- i.e. the dance starts and ends at
+        rest, avoiding an initial velocity jump.
         """
-        left_arm_prev = np.asarray(left_arm_prev, dtype=np.float64)
-        left_arm_target = np.asarray(left_arm_target, dtype=np.float64)
-        right_arm_prev = np.asarray(right_arm_prev, dtype=np.float64)
-        right_arm_target = np.asarray(right_arm_target, dtype=np.float64)
+        left_waypoints = [np.asarray(p, dtype=np.float64) for p in left_waypoints]
+        right_waypoints = [np.asarray(p, dtype=np.float64) for p in right_waypoints]
+        left_grips = [float(g) for g in left_grips]
+        right_grips = [float(g) for g in right_grips]
+
+        assert len(left_waypoints) == len(right_waypoints) == \
+               len(left_grips) == len(right_grips), \
+               "spline driver expects matched-length waypoint / gripper lists"
+        n_waypoints = len(left_waypoints)
+        if n_waypoints < 2:
+            return  # nothing to play
 
         # Simulation timestep (s). Fall back to the default if unavailable.
         try:
@@ -160,49 +174,78 @@ class random_dance(Base_Task):
         except Exception:
             dt = 1.0 / 250.0
 
-        total = max(1, self._dance_hold_substeps)
-        cruise = max(1, int(round(total * self._dance_cruise_ratio)))
-        cruise_time = cruise * dt  # seconds spent cruising
+        steps_per_seg = max(1, int(self._dance_hold_substeps))
+        seg_time = steps_per_seg * dt  # seconds per segment
 
-        # Constant velocity feed-forward during the cruise phase.
-        left_arm_vel = (left_arm_target - left_arm_prev) / cruise_time
-        right_arm_vel = (right_arm_target - right_arm_prev) / cruise_time
-        zero_vel_l = np.zeros_like(left_arm_target)
-        zero_vel_r = np.zeros_like(right_arm_target)
+        # Pad with duplicated ends -> zero-velocity boundary tangents.
+        left_padded = [left_waypoints[0]] + left_waypoints + [left_waypoints[-1]]
+        right_padded = [right_waypoints[0]] + right_waypoints + [right_waypoints[-1]]
 
-        for sub in range(total):
-            if sub < cruise:
-                alpha = (sub + 1) / float(cruise)
-                l_pos = left_arm_prev + (left_arm_target - left_arm_prev) * alpha
-                r_pos = right_arm_prev + (right_arm_target - right_arm_prev) * alpha
-                l_grip = left_grip_prev + (left_grip_target - left_grip_prev) * alpha
-                r_grip = right_grip_prev + (right_grip_target - right_grip_prev) * alpha
-                l_vel = left_arm_vel
-                r_vel = right_arm_vel
-            else:
-                # Settle phase: hold target position, zero velocity reference.
-                l_pos = left_arm_target
-                r_pos = right_arm_target
-                l_grip = left_grip_target
-                r_grip = right_grip_target
-                l_vel = zero_vel_l
-                r_vel = zero_vel_r
+        # Catmull-Rom (uniform, tau=0.5) position and velocity at t in [0,1]:
+        #   h00(t) = 2t^3 - 3t^2 + 1
+        #   h10(t) = t^3 - 2t^2 + t
+        #   h01(t) = -2t^3 + 3t^2
+        #   h11(t) = t^3 - t^2
+        # with tangent m_i = (p_{i+1} - p_{i-1}) / 2.  Return values are in
+        # *normalised* units (per segment). To get rad/s we divide by
+        # ``seg_time``.
+        def eval_segment(padded, i, t):
+            p_prev = padded[i]       # p_{i-1}
+            p0 = padded[i + 1]       # p_i
+            p1 = padded[i + 2]       # p_{i+1}
+            p_next = padded[i + 3]   # p_{i+2}
+            m0 = 0.5 * (p1 - p_prev)
+            m1 = 0.5 * (p_next - p0)
+            t2 = t * t
+            t3 = t2 * t
+            h00 = 2.0 * t3 - 3.0 * t2 + 1.0
+            h10 = t3 - 2.0 * t2 + t
+            h01 = -2.0 * t3 + 3.0 * t2
+            h11 = t3 - t2
+            pos = h00 * p0 + h10 * m0 + h01 * p1 + h11 * m1
+            # d/dt of the Hermite bases
+            dh00 = 6.0 * t2 - 6.0 * t
+            dh10 = 3.0 * t2 - 4.0 * t + 1.0
+            dh01 = -6.0 * t2 + 6.0 * t
+            dh11 = 3.0 * t2 - 2.0 * t
+            vel_per_seg = dh00 * p0 + dh10 * m0 + dh01 * p1 + dh11 * m1
+            return pos, vel_per_seg
 
-            self.robot.set_arm_joints(l_pos, l_vel, "left")
-            self.robot.set_arm_joints(r_pos, r_vel, "right")
-            self.robot.set_gripper(float(l_grip), "left")
-            self.robot.set_gripper(float(r_grip), "right")
-            self.scene.step()
-            self._update_render()
-            if self.render_freq and hasattr(self, "viewer"):
-                try:
-                    self.viewer.render()
-                except Exception:
-                    pass
-            if sub % self._dance_save_every == 0:
-                self._take_picture()
-        # Always take one final snapshot at the end of the key-frame.
-        self._take_picture()
+        n_segments = n_waypoints - 1
+        for seg in range(n_segments):
+            g_prev_l = left_grips[seg]
+            g_next_l = left_grips[seg + 1]
+            g_prev_r = right_grips[seg]
+            g_next_r = right_grips[seg + 1]
+            for sub in range(steps_per_seg):
+                # t goes (1/steps_per_seg, 2/steps_per_seg, ..., 1) so we
+                # always include the exact endpoint on the last substep.
+                t = (sub + 1) / float(steps_per_seg)
+
+                l_pos, l_vel_norm = eval_segment(left_padded, seg, t)
+                r_pos, r_vel_norm = eval_segment(right_padded, seg, t)
+                l_vel = l_vel_norm / seg_time
+                r_vel = r_vel_norm / seg_time
+                # Grippers: plain linear interpolation inside the segment.
+                l_grip = g_prev_l + (g_next_l - g_prev_l) * t
+                r_grip = g_prev_r + (g_next_r - g_prev_r) * t
+
+                self.robot.set_arm_joints(l_pos, l_vel, "left")
+                self.robot.set_arm_joints(r_pos, r_vel, "right")
+                self.robot.set_gripper(float(l_grip), "left")
+                self.robot.set_gripper(float(r_grip), "right")
+                self.scene.step()
+                self._update_render()
+                if self.render_freq and hasattr(self, "viewer"):
+                    try:
+                        self.viewer.render()
+                    except Exception:
+                        pass
+                if sub % self._dance_save_every == 0:
+                    self._take_picture()
+            # One snapshot at the end of every segment (keeps coverage
+            # comparable to the previous _drive_to_keyframe implementation).
+            self._take_picture()
 
     def play_once(self):
         # Use the task-level "dance home" (not the embodiment homestate) as the
@@ -213,13 +256,6 @@ class random_dance(Base_Task):
         # Current gripper values (normalised [0,1]).
         left_grip = float(self.robot.get_left_gripper_val() or 0.0)
         right_grip = float(self.robot.get_right_gripper_val() or 0.0)
-
-        # "prev_*" tracks where the robot is *coming from* for the current
-        # key-frame so that _drive_to_keyframe can build a smooth ramp.
-        prev_left_arm = left_home.copy()
-        prev_right_arm = right_home.copy()
-        prev_left_grip = left_grip
-        prev_right_grip = right_grip
 
         if self.need_plan:
             # ---------- generate a fresh random dance ----------
@@ -243,36 +279,29 @@ class random_dance(Base_Task):
                     "gripper": right_grip,
                 })
 
-                self._drive_to_keyframe(
-                    prev_left_arm, l_arm,
-                    prev_right_arm, r_arm,
-                    prev_left_grip, left_grip,
-                    prev_right_grip, right_grip,
-                )
-                prev_left_arm = l_arm
-                prev_right_arm = r_arm
-                prev_left_grip = left_grip
-                prev_right_grip = right_grip
-        else:
-            # ---------- replay the recorded dance ----------
-            n = min(len(self.left_joint_path), len(self.right_joint_path))
-            for i in range(n):
-                l_kf = self.left_joint_path[i]
-                r_kf = self.right_joint_path[i]
-                l_arm = np.asarray(l_kf["arm"] if isinstance(l_kf, dict) else l_kf, dtype=np.float64)
-                r_arm = np.asarray(r_kf["arm"] if isinstance(r_kf, dict) else r_kf, dtype=np.float64)
-                l_grip = float(l_kf["gripper"]) if isinstance(l_kf, dict) else prev_left_grip
-                r_grip = float(r_kf["gripper"]) if isinstance(r_kf, dict) else prev_right_grip
-                self._drive_to_keyframe(
-                    prev_left_arm, l_arm,
-                    prev_right_arm, r_arm,
-                    prev_left_grip, l_grip,
-                    prev_right_grip, r_grip,
-                )
-                prev_left_arm = l_arm
-                prev_right_arm = r_arm
-                prev_left_grip = l_grip
-                prev_right_grip = r_grip
+        # Build the full waypoint / gripper lists. Index 0 is the current
+        # pose (dance home); 1..N are the sampled keyframes. Works for both
+        # the fresh-sampling pass above and the replay pass (when
+        # self.left_joint_path was loaded from disk).
+        n = min(len(self.left_joint_path), len(self.right_joint_path))
+        left_waypoints = [left_home.copy()]
+        right_waypoints = [right_home.copy()]
+        left_grips = [left_grip]
+        right_grips = [right_grip]
+        for i in range(n):
+            l_kf = self.left_joint_path[i]
+            r_kf = self.right_joint_path[i]
+            l_arm = np.asarray(l_kf["arm"] if isinstance(l_kf, dict) else l_kf, dtype=np.float64)
+            r_arm = np.asarray(r_kf["arm"] if isinstance(r_kf, dict) else r_kf, dtype=np.float64)
+            l_grip = float(l_kf["gripper"]) if isinstance(l_kf, dict) else left_grips[-1]
+            r_grip = float(r_kf["gripper"]) if isinstance(r_kf, dict) else right_grips[-1]
+            left_waypoints.append(l_arm)
+            right_waypoints.append(r_arm)
+            left_grips.append(l_grip)
+            right_grips.append(r_grip)
+
+        # Drive the whole sequence with one continuous spline playback.
+        self._drive_spline(left_waypoints, right_waypoints, left_grips, right_grips)
 
         self.info["info"] = {"{A}": "random_dance", "{a}": "dual"}
         return self.info

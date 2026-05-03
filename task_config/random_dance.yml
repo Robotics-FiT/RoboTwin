@@ -67,16 +67,16 @@ collect_data: true
 eval_video_log: true
 # Random-dance specific knobs (consumed by envs/random_dance.py).
 # Larger `arm_delta` -> bigger dance amplitude; `hold_substeps` must also grow,
-# otherwise the drive target is reached only partially within each key-frame.
-# `cruise_ratio` controls how much of each key-frame is spent smoothly
-# interpolating to the next target (1.0 = no settle phase = smoothest motion).
+# otherwise each keyframe segment gets traversed too fast for the PD
+# controller to follow smoothly. Playback uses a C^1 Catmull-Rom spline so
+# consecutive segments are stitched seamlessly -- no settle phase, no
+# start-stop-start-stop stutter.
 random_dance:
   n_steps: 30
   arm_delta: 0.6        # radians (~34 deg) around home state per joint
   gripper_toggle_p: 0.2
-  hold_substeps: 80     # physics substeps spent converging to each key-frame
+  hold_substeps: 80     # physics substeps per keyframe segment
   save_every: 8         # save one observation every N substeps
-  cruise_ratio: 1.0     # [0.05, 1.0]; lower -> more settle time between key-frames
   # Centre of the random joint sampling (task-level "dance home", independent of
   # the embodiment's homestate). Tweak so both arms spread open and face the
   # observer camera. Joint order: [j1 shoulder-yaw, j2 shoulder-pitch,
