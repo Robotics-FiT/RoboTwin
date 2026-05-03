@@ -66,10 +66,13 @@ class random_dance(Base_Task):
         self._dance_save_every = max(1, int(dance_cfg.get("save_every", self.DEFAULT_SAVE_EVERY)))
 
         # ``mode`` selects the keyframe source:
-        #   "joint"   (default): legacy random joint-space sampling around home
-        #   "ik_debug": single-shot IK test. Each arm is driven to a fixed
-        #               Cartesian target (table-half centre hovering above
-        #               the table) and the resulting joint angles are printed.
+        #   "joint"    (default): legacy random joint-space sampling around home
+        #   "task"     : random end-effector (Cartesian) sampling per arm,
+        #                each arm restricted to its own half of the table;
+        #                keyframe orientation is inherited from the current EE
+        #                pose so the planner only has to solve for position.
+        #   "ik_debug" : single-shot IK test at fixed target(s), logs joint
+        #                angles. Used to validate reach/mapping.
         self._dance_mode = str(dance_cfg.get("mode", "joint")).lower()
         # Hover height (metres) above the table top used by ik_debug mode.
         self._dance_ik_debug_hover = float(dance_cfg.get("ik_debug_hover", 0.20))
@@ -79,6 +82,21 @@ class random_dance(Base_Task):
         # target leaves the tabletop (table width is 0.7 -> front edge at
         # y=+0.35).
         self._dance_ik_debug_forward = float(dance_cfg.get("ik_debug_forward", 0.20))
+
+        # Task-space sampling box ('task' mode only). Each arm samples a
+        # target inside its own [xmin, xmax] x [ymin, ymax] x [zmin, zmax]
+        # in world coordinates. Defaults are conservative: they cover
+        # roughly the arm's half of the table, stay a small margin inside
+        # the tabletop edges, and hover 8-25 cm above the table top. All
+        # values overridable per-task in the yaml.
+        task_cfg = dance_cfg.get("task", {}) or {}
+        self._dance_task_left_x = tuple(task_cfg.get("left_x_range", [-0.55, -0.05]))
+        self._dance_task_right_x = tuple(task_cfg.get("right_x_range", [0.05, 0.55]))
+        self._dance_task_y = tuple(task_cfg.get("y_range", [-0.30, 0.25]))
+        # z is relative to the *table top* so it tracks ``table_z_bias``.
+        self._dance_task_z_rel = tuple(task_cfg.get("z_rel_range", [0.08, 0.25]))
+        # How many times to retry when a sampled target is IK-unreachable.
+        self._dance_task_max_retries = int(task_cfg.get("max_retries", 8))
 
         # Dance home: explicit yaml override > built-in default > embodiment homestate.
         n_left = len(self.robot.left_arm_joints)
@@ -267,6 +285,139 @@ class random_dance(Base_Task):
             self._take_picture()
 
     # ------------------------------------------------------------------
+    # Task-space (Cartesian) sampling
+    # ------------------------------------------------------------------
+    def _sample_task_target(self, arm_tag, rng):
+        """Uniform sample a 3D target within the arm's reachable box.
+
+        ``rng`` is a ``np.random.Generator``; we pass it in explicitly so
+        the caller controls seeding (one dedicated stream per episode,
+        so task-space sampling does not poison global ``np.random``).
+
+        Returns world-frame (x, y, z).
+        """
+        if arm_tag == "left":
+            xr = self._dance_task_left_x
+        else:
+            xr = self._dance_task_right_x
+        yr = self._dance_task_y
+        zr_rel = self._dance_task_z_rel
+
+        table_x_bias, table_y_bias = self.table_xy_bias
+        table_top_z = 0.74 + self.table_z_bias
+
+        x = table_x_bias + float(rng.uniform(xr[0], xr[1]))
+        y = table_y_bias + float(rng.uniform(yr[0], yr[1]))
+        z = table_top_z + float(rng.uniform(zr_rel[0], zr_rel[1]))
+        return np.array([x, y, z], dtype=np.float64)
+
+    def _plan_ik_keep_orientation(self, target_xyz, arm_tag, seed_qpos=None):
+        """IK toward ``target_xyz`` keeping the current EE orientation.
+
+        ``seed_qpos`` (optional) is the **arm-only** joint vector to warm-start
+        the IK with (length = len(arm_joints)). Passing the previous sampled
+        waypoint's joint config dramatically improves IK success rates for
+        task-space chaining because the search starts close to a known
+        feasible solution. Under the hood we splice this arm-only vector
+        into the articulation's *full* active-joint qpos (which is what the
+        planner actually expects), so the arm indices get warm-started
+        while gripper / base joints keep their current values.
+
+        Returns ``(qpos_arm_only or None, ee_pose_before)``.
+        """
+        if arm_tag == "left":
+            entity = self.robot.left_entity
+            arm_joints = self.robot.left_arm_joints
+            ee_pose_now = self.robot.get_left_ee_pose()
+        else:
+            entity = self.robot.right_entity
+            arm_joints = self.robot.right_arm_joints
+            ee_pose_now = self.robot.get_right_ee_pose()
+
+        qw, qx, qy, qz = ee_pose_now[3:7]
+        target_pose = [
+            float(target_xyz[0]), float(target_xyz[1]), float(target_xyz[2]),
+            float(qw), float(qx), float(qy), float(qz),
+        ]
+
+        kwargs = {}
+        if seed_qpos is not None:
+            # Build full active-joint qpos with our seed overwriting only the
+            # arm joints' slots. The planner internally indexes into this
+            # array via ``self.all_joints`` -> ``active_joints_name``.
+            # Keep the dtype identical to ``entity.get_qpos()`` -- curobo
+            # wraps it in ``torch.tensor(...)`` which defaults to float32,
+            # so passing float64 triggers "expected scalar type Float but
+            # found Double" inside the planner.
+            entity_qpos = np.asarray(entity.get_qpos())
+            full_qpos = entity_qpos.copy()
+            active_joints = entity.get_active_joints()
+            arm_joint_names = [j.get_name() for j in arm_joints]
+            for i, aj in enumerate(active_joints):
+                if aj.get_name() in arm_joint_names:
+                    idx_in_seed = arm_joint_names.index(aj.get_name())
+                    full_qpos[i] = full_qpos.dtype.type(seed_qpos[idx_in_seed])
+            kwargs["last_qpos"] = full_qpos
+
+        if arm_tag == "left":
+            plan = self.robot.left_plan_path(target_pose, **kwargs)
+        else:
+            plan = self.robot.right_plan_path(target_pose, **kwargs)
+
+        if plan is None or plan.get("status") != "Success":
+            return None, ee_pose_now
+        # Planner returns arm-joint qpos (length = len(arm_joints)).
+        return np.asarray(plan["position"][-1], dtype=np.float64), ee_pose_now
+
+    def _sample_task_keyframes(self, seed_left_qpos, seed_right_qpos,
+                               n_steps, rng):
+        """Generate a sequence of ``n_steps`` IK-valid joint waypoints per
+        arm by sampling random 3D targets inside the arm's box and solving
+        IK. Each waypoint uses the previous successful joint config as the
+        IK seed (warm-start) for continuity and higher success rates.
+
+        If every retry fails for a given step, the previous successful
+        waypoint is repeated (the arm stays put for that step rather than
+        throwing). This keeps the dance running even near box edges.
+
+        Returns ``(left_waypoints, right_waypoints)`` -- lists of length
+        ``n_steps`` of ndarray(ndof,).
+        """
+        left_waypoints = []
+        right_waypoints = []
+        cur_left = np.asarray(seed_left_qpos, dtype=np.float64)
+        cur_right = np.asarray(seed_right_qpos, dtype=np.float64)
+        l_fail = r_fail = 0
+        for step in range(n_steps):
+            # Left arm
+            for _ in range(self._dance_task_max_retries):
+                tgt = self._sample_task_target("left", rng)
+                q, _ = self._plan_ik_keep_orientation(tgt, "left", seed_qpos=cur_left)
+                if q is not None:
+                    cur_left = q
+                    break
+            else:
+                l_fail += 1  # all retries exhausted; just repeat cur_left
+            left_waypoints.append(cur_left.copy())
+
+            # Right arm
+            for _ in range(self._dance_task_max_retries):
+                tgt = self._sample_task_target("right", rng)
+                q, _ = self._plan_ik_keep_orientation(tgt, "right", seed_qpos=cur_right)
+                if q is not None:
+                    cur_right = q
+                    break
+            else:
+                r_fail += 1
+            right_waypoints.append(cur_right.copy())
+
+        if l_fail or r_fail:
+            print(f"\033[93m[random_dance task]\033[0m IK retries exhausted: "
+                  f"left={l_fail}/{n_steps}  right={r_fail}/{n_steps}  "
+                  f"(these keyframes reused the previous pose)")
+        return left_waypoints, right_waypoints
+
+    # ------------------------------------------------------------------
     # Task-space (IK) debug mode
     # ------------------------------------------------------------------
     def _plan_ik_for_arm(self, target_xyz, arm_tag):
@@ -426,6 +577,52 @@ class random_dance(Base_Task):
                     left_grips.append(float(l_kf["gripper"]))
                     right_grips.append(float(r_kf["gripper"]))
                 self._drive_spline(left_waypoints, right_waypoints, left_grips, right_grips)
+            self.info["info"] = {"{A}": "random_dance", "{a}": "dual"}
+            return self.info
+
+        # -- TASK-SPACE DANCE (random Cartesian targets) -----------------
+        if self._dance_mode == "task":
+            if self.need_plan:
+                # Dedicated RNG so task sampling is reproducible per-seed
+                # and does not disturb other global random consumers
+                # (HDRI rotation, domain randomisation, etc).
+                base_seed = int(getattr(self, "ep_num", 0))
+                rng = np.random.default_rng(
+                    int(np.uint32(base_seed * 2246822519 + 0xBEEF))
+                )
+                # Seed IK search at the dance home (the arms sit there at
+                # the start of the episode). ``left_home`` / ``right_home``
+                # already have the same length as ``arm_joints`` (6 for
+                # aloha-agilex), and ``_plan_ik_keep_orientation`` will
+                # splice these into the articulation's full qpos internally.
+                left_wps, right_wps = self._sample_task_keyframes(
+                    left_home, right_home, self._dance_n_steps, rng,
+                )
+                # Randomise gripper exactly like joint mode (reuses global
+                # np.random so ``gripper_toggle_p`` behaves the same).
+                self.left_joint_path = []
+                self.right_joint_path = []
+                for l_arm, r_arm in zip(left_wps, right_wps):
+                    if np.random.rand() < self._dance_gripper_toggle_p:
+                        left_grip = float(np.random.uniform(0.0, 1.0))
+                    if np.random.rand() < self._dance_gripper_toggle_p:
+                        right_grip = float(np.random.uniform(0.0, 1.0))
+                    self.left_joint_path.append({"arm": l_arm.tolist(), "gripper": left_grip})
+                    self.right_joint_path.append({"arm": r_arm.tolist(), "gripper": right_grip})
+            # -- Play back (fresh or replayed traj data) ------------------
+            left_waypoints = [left_home.copy()]
+            right_waypoints = [right_home.copy()]
+            left_grips = [left_grip]
+            right_grips = [right_grip]
+            n = min(len(self.left_joint_path), len(self.right_joint_path))
+            for i in range(n):
+                l_kf = self.left_joint_path[i]
+                r_kf = self.right_joint_path[i]
+                left_waypoints.append(np.asarray(l_kf["arm"], dtype=np.float64))
+                right_waypoints.append(np.asarray(r_kf["arm"], dtype=np.float64))
+                left_grips.append(float(l_kf["gripper"]))
+                right_grips.append(float(r_kf["gripper"]))
+            self._drive_spline(left_waypoints, right_waypoints, left_grips, right_grips)
             self.info["info"] = {"{A}": "random_dance", "{a}": "dual"}
             return self.info
 

@@ -72,15 +72,27 @@ eval_video_log: true
 # consecutive segments are stitched seamlessly -- no settle phase, no
 # start-stop-start-stop stutter.
 random_dance:
-  # "joint"   : legacy random joint-space dance (default).
-  # "ik_debug": drive each arm once to the corresponding half-table centre
-  #             via IK and log the resulting joint angles. Used to validate
-  #             left/right mapping and IK before enabling task-space sampling.
-  mode: ik_debug
-  ik_debug_hover: 0.20    # metres above the table top (ik_debug mode only)
-  ik_debug_forward: 0.20  # metres toward observer camera (+y direction); 0 = table-half centre, 0.30 ~= near table front edge
+  # "joint"    : legacy random joint-space dance.
+  # "task"     : random Cartesian targets per arm (see ``task`` block below);
+  #              each arm stays inside its own half of the table.
+  # "ik_debug" : drive once to a fixed Cartesian target and log IK output.
+  mode: task
+  # ik_debug-only knobs
+  ik_debug_hover: 0.20    # metres above the table top
+  ik_debug_forward: 0.20  # metres toward observer camera (+y direction)
+  # task-mode sampling box. All values are world-frame metres (before adding
+  # the small random ``table_xy_bias`` / ``table_z_bias`` jitters). The z
+  # range is *relative to the table top* so it tracks ``random_table_height``.
+  # Keep left_x/right_x strictly non-overlapping to avoid the two arms IK-ing
+  # to the same spot.
+  task:
+    left_x_range:  [-0.55, -0.05]   # left arm -> world -x half
+    right_x_range: [ 0.05,  0.55]   # right arm -> world +x half
+    y_range:       [-0.30,  0.25]   # table front edge is y=+0.35
+    z_rel_range:   [ 0.08,  0.25]   # metres above table top
+    max_retries:   8                # per-keyframe IK retries before reusing the previous pose
   n_steps: 30
-  arm_delta: 0.6        # radians (~34 deg) around home state per joint
+  arm_delta: 0.6        # radians (~34 deg) around home state per joint (joint mode only)
   gripper_toggle_p: 0.2
   hold_substeps: 80     # physics substeps per keyframe segment
   save_every: 8         # save one observation every N substeps
