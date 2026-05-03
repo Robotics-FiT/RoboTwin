@@ -4,7 +4,7 @@ hdri_sun_max_elevation_deg: 80.0   # 想封顶避免阴影太短
 render_freq: 0
 # Number of episodes collected per run. Lower this while debugging (e.g. 3),
 # raise it (e.g. 50) when actually producing data for training.
-episode_num: 1                 
+episode_num: 100                 
 use_seed: false
 save_freq: 15
 embodiment: [aloha-agilex]
@@ -14,7 +14,13 @@ domain_randomization:
   cluttered_table: true
   clean_background_rate: 0.1
   random_head_camera_dis: 0
-  random_table_height: 0.03
+  # Table z jitter per episode: sampled uniformly in
+  # [-random_table_height, +random_table_height] (symmetric). See
+  # docs/scene_geometry.md. Reachable range for aloha-agilex is roughly
+  # +/- 0.15 m; past that, either the robot base interferes with the
+  # tabletop (sinking too far) or task-mode IK starts failing often
+  # (rising too high).
+  random_table_height: 0.08
   random_light: true
   crazy_random_light_rate: 0.05
   # Scene tweak (not a randomiser). Set to true to skip creating the back

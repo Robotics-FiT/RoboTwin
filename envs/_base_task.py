@@ -146,7 +146,16 @@ class Base_Task(gym.Env):
         self.record_cluttered_objects = list()  # record cluttered objects info
 
         self.eval_success = False
-        self.table_z_bias = (np.random.uniform(low=-self.random_table_height, high=0) + table_height_bias)  # TODO
+        # Sample table height jitter symmetrically around the nominal height.
+        # Positive -> table rises (harder for IK because EE is closer to the
+        # arm's reach limit). Negative -> table sinks (watch out for the
+        # robot base at z=0 and table legs below ~-0.15 m). See
+        # docs/scene_geometry.md for the recommended range (~+/-0.10 m).
+        self.table_z_bias = (
+            float(np.random.uniform(low=-self.random_table_height,
+                                    high=+self.random_table_height))
+            + table_height_bias
+        )
         self.need_plan = kwags.get("need_plan", True)
         self.left_joint_path = kwags.get("left_joint_path", [])
         self.right_joint_path = kwags.get("right_joint_path", [])
