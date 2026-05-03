@@ -97,6 +97,28 @@ class random_dance(Base_Task):
         self._dance_task_z_rel = tuple(task_cfg.get("z_rel_range", [0.08, 0.25]))
         # How many times to retry when a sampled target is IK-unreachable.
         self._dance_task_max_retries = int(task_cfg.get("max_retries", 8))
+        # Max orientation perturbation (deg) around the home EE orientation.
+        # Each waypoint right-multiplies the home quaternion by a random
+        # axis-angle within this cone, so 0 = fixed orientation (old
+        # behaviour), 15 = mild wrist wobble, 40+ = quite expressive.
+        # IK success drops off quickly past ~45 deg.
+        self._dance_task_pose_perturb_deg = float(task_cfg.get("pose_perturb_deg", 20.0))
+        # Upper bound on the single-joint step size between consecutive
+        # IK waypoints, in radians. Curobo often returns equivalent
+        # configurations differing by >1 rad on redundant joints even when
+        # the EE target moves only slightly; without a cap the spline then
+        # has to cover, say, 2 rad in ``hold_substeps`` physics ticks,
+        # which renders as a whip-fast arm sweep. Whenever a fresh IK
+        # solution exceeds this cap, we retry (sampling a new EE target
+        # / new wrist perturbation).
+        self._dance_task_max_joint_step = float(task_cfg.get("max_joint_step", 1.0))
+        # To keep visual *peak* angular speed roughly constant across
+        # waypoints that happen to have very different joint-space span,
+        # we stretch the playback segment duration proportionally when a
+        # waypoint's joint delta exceeds this reference. Duration is
+        # clamped to [1x, stretch_cap x] of ``hold_substeps``.
+        self._dance_task_speed_ref_rad = float(task_cfg.get("speed_ref_rad", 0.8))
+        self._dance_task_stretch_cap = float(task_cfg.get("stretch_cap", 3.0))
 
         # Dance home: explicit yaml override > built-in default > embodiment homestate.
         n_left = len(self.robot.left_arm_joints)
@@ -211,8 +233,15 @@ class random_dance(Base_Task):
         except Exception:
             dt = 1.0 / 250.0
 
-        steps_per_seg = max(1, int(self._dance_hold_substeps))
-        seg_time = steps_per_seg * dt  # seconds per segment
+        steps_per_seg_base = max(1, int(self._dance_hold_substeps))
+        # Per-segment substep budget. We stretch segments whose joint-space
+        # span exceeds ``speed_ref_rad`` so that the peak angular speed
+        # seen in the video stays roughly constant (see settings in
+        # ``setup_demo``). Only used in task mode -- joint-mode waypoints
+        # are already tightly bounded by ``arm_delta`` so they never need
+        # stretching.
+        ref_rad = float(getattr(self, "_dance_task_speed_ref_rad", 0.0))
+        stretch_cap = float(getattr(self, "_dance_task_stretch_cap", 1.0))
 
         # Pad with duplicated ends -> zero-velocity boundary tangents.
         left_padded = [left_waypoints[0]] + left_waypoints + [left_waypoints[-1]]
@@ -225,7 +254,7 @@ class random_dance(Base_Task):
         #   h11(t) = t^3 - t^2
         # with tangent m_i = (p_{i+1} - p_{i-1}) / 2.  Return values are in
         # *normalised* units (per segment). To get rad/s we divide by
-        # ``seg_time``.
+        # the *actual* segment time (which may be stretched).
         def eval_segment(padded, i, t):
             p_prev = padded[i]       # p_{i-1}
             p0 = padded[i + 1]       # p_i
@@ -250,6 +279,19 @@ class random_dance(Base_Task):
 
         n_segments = n_waypoints - 1
         for seg in range(n_segments):
+            # Decide this segment's playback length. We look at the
+            # larger of the two arms' joint-space delta for this segment
+            # so that whichever arm moves the most drives the pacing.
+            if ref_rad > 0.0:
+                l_span = float(np.max(np.abs(left_waypoints[seg + 1] - left_waypoints[seg])))
+                r_span = float(np.max(np.abs(right_waypoints[seg + 1] - right_waypoints[seg])))
+                span = max(l_span, r_span)
+                stretch = max(1.0, min(stretch_cap, span / ref_rad))
+            else:
+                stretch = 1.0
+            steps_per_seg = max(1, int(round(steps_per_seg_base * stretch)))
+            seg_time = steps_per_seg * dt  # seconds for THIS segment
+
             g_prev_l = left_grips[seg]
             g_next_l = left_grips[seg + 1]
             g_prev_r = right_grips[seg]
@@ -287,6 +329,46 @@ class random_dance(Base_Task):
     # ------------------------------------------------------------------
     # Task-space (Cartesian) sampling
     # ------------------------------------------------------------------
+    @staticmethod
+    def _random_quat_perturb(rng, max_angle_deg):
+        """Return a unit quaternion (w, x, y, z) uniform on an SO(3) cap of
+        half-angle ``max_angle_deg`` (degrees), i.e. a "small random
+        rotation" centred on identity. If ``max_angle_deg <= 0`` we return
+        the identity quaternion.
+
+        We sample the axis uniformly on S^2 and the angle magnitude uniformly
+        in [0, max_angle_deg]. That is *not* Haar-uniform on the spherical
+        cap (which would bias toward the edge), but for data augmentation
+        a uniform-angle cap is what people actually want -- it gives a
+        predictable, bounded "how much the wrist wobbles" knob.
+        """
+        if max_angle_deg <= 0.0:
+            return np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float64)
+        # Uniform axis on the unit sphere via normalised Gaussian.
+        axis = rng.normal(size=3)
+        n = float(np.linalg.norm(axis))
+        if n < 1e-8:
+            axis = np.array([0.0, 0.0, 1.0])
+        else:
+            axis = axis / n
+        angle = float(rng.uniform(-np.deg2rad(max_angle_deg), np.deg2rad(max_angle_deg)))
+        half = 0.5 * angle
+        s = float(np.sin(half))
+        c = float(np.cos(half))
+        return np.array([c, axis[0] * s, axis[1] * s, axis[2] * s], dtype=np.float64)
+
+    @staticmethod
+    def _quat_mul(q_a, q_b):
+        """Hamilton product q_a * q_b, with quaternion convention (w, x, y, z)."""
+        w1, x1, y1, z1 = q_a
+        w2, x2, y2, z2 = q_b
+        return np.array([
+            w1 * w2 - x1 * x2 - y1 * y2 - z1 * z2,
+            w1 * x2 + x1 * w2 + y1 * z2 - z1 * y2,
+            w1 * y2 - x1 * z2 + y1 * w2 + z1 * x2,
+            w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2,
+        ], dtype=np.float64)
+
     def _sample_task_target(self, arm_tag, rng):
         """Uniform sample a 3D target within the arm's reachable box.
 
@@ -311,8 +393,10 @@ class random_dance(Base_Task):
         z = table_top_z + float(rng.uniform(zr_rel[0], zr_rel[1]))
         return np.array([x, y, z], dtype=np.float64)
 
-    def _plan_ik_keep_orientation(self, target_xyz, arm_tag, seed_qpos=None):
-        """IK toward ``target_xyz`` keeping the current EE orientation.
+    def _plan_ik_keep_orientation(self, target_xyz, arm_tag, seed_qpos=None,
+                                  target_quat=None):
+        """IK toward ``target_xyz`` at orientation ``target_quat`` (or the
+        current EE orientation when ``target_quat is None``).
 
         ``seed_qpos`` (optional) is the **arm-only** joint vector to warm-start
         the IK with (length = len(arm_joints)). Passing the previous sampled
@@ -322,6 +406,10 @@ class random_dance(Base_Task):
         into the articulation's *full* active-joint qpos (which is what the
         planner actually expects), so the arm indices get warm-started
         while gripper / base joints keep their current values.
+
+        ``target_quat`` is a length-4 (w, x, y, z) quaternion in the *world*
+        frame -- same layout as ``get_left_ee_pose()[3:7]``. When left as
+        ``None`` we copy the current EE quaternion (old behaviour).
 
         Returns ``(qpos_arm_only or None, ee_pose_before)``.
         """
@@ -334,7 +422,10 @@ class random_dance(Base_Task):
             arm_joints = self.robot.right_arm_joints
             ee_pose_now = self.robot.get_right_ee_pose()
 
-        qw, qx, qy, qz = ee_pose_now[3:7]
+        if target_quat is None:
+            qw, qx, qy, qz = ee_pose_now[3:7]
+        else:
+            qw, qx, qy, qz = target_quat
         target_pose = [
             float(target_xyz[0]), float(target_xyz[1]), float(target_xyz[2]),
             float(qw), float(qx), float(qy), float(qz),
@@ -387,26 +478,94 @@ class random_dance(Base_Task):
         right_waypoints = []
         cur_left = np.asarray(seed_left_qpos, dtype=np.float64)
         cur_right = np.asarray(seed_right_qpos, dtype=np.float64)
+        # Home EE quaternions (captured once at the start of sampling -- the
+        # robot is still at dance home). Each waypoint will right-multiply
+        # this with a small random perturbation so the wrist "wobbles"
+        # around the home orientation instead of being pinned to it.
+        left_home_quat = np.asarray(self.robot.get_left_ee_pose()[3:7], dtype=np.float64)
+        right_home_quat = np.asarray(self.robot.get_right_ee_pose()[3:7], dtype=np.float64)
+        max_deg = self._dance_task_pose_perturb_deg
+
+        def unwrap_toward(prev, new):
+            """Return ``new`` shifted by 2*pi multiples per joint so it lies
+            within +/- pi of ``prev``. Handles the "IK may return equivalent
+            angles differing by 2*pi" issue, which otherwise makes the
+            Catmull-Rom spline sweep 355 degrees in a fraction of a second
+            ("whip-around" artefact in the rendered video).
+            """
+            prev = np.asarray(prev, dtype=np.float64)
+            new = np.asarray(new, dtype=np.float64).copy()
+            diff = new - prev
+            # Number of full turns to add/subtract so each joint diff lands
+            # in (-pi, pi]. ``np.round`` rounds half toward even but that's
+            # fine because it's only hit when diff == exactly pi.
+            turns = np.round(diff / (2.0 * np.pi))
+            new -= turns * (2.0 * np.pi)
+            return new
+
         l_fail = r_fail = 0
         for step in range(n_steps):
-            # Left arm
-            for _ in range(self._dance_task_max_retries):
+            # Left arm: try many IK attempts and pick the one with the
+            # *smallest* joint-space step from ``cur_left``. This prefers
+            # low-speed segments in the rendered video, while still
+            # accepting large steps when no nearby solution exists (rather
+            # than freezing the arm completely).
+            best_q_l = None
+            best_span_l = float("inf")
+            for attempt in range(self._dance_task_max_retries):
                 tgt = self._sample_task_target("left", rng)
-                q, _ = self._plan_ik_keep_orientation(tgt, "left", seed_qpos=cur_left)
-                if q is not None:
-                    cur_left = q
+                # First retries use the perturbed quat; the last one falls
+                # back to the pristine home quat.
+                use_home = attempt >= self._dance_task_max_retries - 1
+                if use_home or max_deg <= 0.0:
+                    target_q = left_home_quat
+                else:
+                    delta = self._random_quat_perturb(rng, max_deg)
+                    target_q = self._quat_mul(left_home_quat, delta)
+                q, _ = self._plan_ik_keep_orientation(
+                    tgt, "left", seed_qpos=cur_left, target_quat=target_q,
+                )
+                if q is None:
+                    continue
+                q = unwrap_toward(cur_left, q)
+                span = float(np.max(np.abs(q - cur_left)))
+                if span < best_span_l:
+                    best_q_l = q
+                    best_span_l = span
+                # Early exit once we find a "well-behaved" solution.
+                if span <= self._dance_task_max_joint_step:
                     break
+            if best_q_l is not None:
+                cur_left = best_q_l
             else:
-                l_fail += 1  # all retries exhausted; just repeat cur_left
+                l_fail += 1  # all retries returned None; repeat cur_left
             left_waypoints.append(cur_left.copy())
 
             # Right arm
-            for _ in range(self._dance_task_max_retries):
+            best_q_r = None
+            best_span_r = float("inf")
+            for attempt in range(self._dance_task_max_retries):
                 tgt = self._sample_task_target("right", rng)
-                q, _ = self._plan_ik_keep_orientation(tgt, "right", seed_qpos=cur_right)
-                if q is not None:
-                    cur_right = q
+                use_home = attempt >= self._dance_task_max_retries - 1
+                if use_home or max_deg <= 0.0:
+                    target_q = right_home_quat
+                else:
+                    delta = self._random_quat_perturb(rng, max_deg)
+                    target_q = self._quat_mul(right_home_quat, delta)
+                q, _ = self._plan_ik_keep_orientation(
+                    tgt, "right", seed_qpos=cur_right, target_quat=target_q,
+                )
+                if q is None:
+                    continue
+                q = unwrap_toward(cur_right, q)
+                span = float(np.max(np.abs(q - cur_right)))
+                if span < best_span_r:
+                    best_q_r = q
+                    best_span_r = span
+                if span <= self._dance_task_max_joint_step:
                     break
+            if best_q_r is not None:
+                cur_right = best_q_r
             else:
                 r_fail += 1
             right_waypoints.append(cur_right.copy())
@@ -415,6 +574,36 @@ class random_dance(Base_Task):
             print(f"\033[93m[random_dance task]\033[0m IK retries exhausted: "
                   f"left={l_fail}/{n_steps}  right={r_fail}/{n_steps}  "
                   f"(these keyframes reused the previous pose)")
+
+        # ---- Per-keyframe diagnostic: max joint delta vs. previous ------
+        # If a waypoint ends up nearly identical to the previous one (even
+        # though IK reported "Success"), the arm will appear *frozen* in
+        # the video. This can happen when the planner clamps an
+        # unreachable target to the nearest feasible qpos, which is
+        # frequently the same as the seed. Surface these cases so we can
+        # tell "frozen because IK failed and we fell back" from "frozen
+        # because IK succeeded but snapped to the seed".
+        seed_left = np.asarray(seed_left_qpos, dtype=np.float64)
+        seed_right = np.asarray(seed_right_qpos, dtype=np.float64)
+        left_deltas = [float(np.max(np.abs(left_waypoints[0] - seed_left)))]
+        right_deltas = [float(np.max(np.abs(right_waypoints[0] - seed_right)))]
+        for i in range(1, len(left_waypoints)):
+            left_deltas.append(
+                float(np.max(np.abs(left_waypoints[i] - left_waypoints[i - 1])))
+            )
+            right_deltas.append(
+                float(np.max(np.abs(right_waypoints[i] - right_waypoints[i - 1])))
+            )
+        frozen_thr = 1e-3  # < 0.06 deg per joint -> effectively frozen
+        l_frozen_steps = [i for i, d in enumerate(left_deltas) if d < frozen_thr]
+        r_frozen_steps = [i for i, d in enumerate(right_deltas) if d < frozen_thr]
+        print(f"\033[96m[random_dance task]\033[0m keyframe max-joint delta (rad):")
+        print("  left :", [f"{d:.3f}" for d in left_deltas])
+        print("  right:", [f"{d:.3f}" for d in right_deltas])
+        if l_frozen_steps:
+            print(f"\033[93m  LEFT frozen at steps {l_frozen_steps}\033[0m")
+        if r_frozen_steps:
+            print(f"\033[93m  RIGHT frozen at steps {r_frozen_steps}\033[0m")
         return left_waypoints, right_waypoints
 
     # ------------------------------------------------------------------

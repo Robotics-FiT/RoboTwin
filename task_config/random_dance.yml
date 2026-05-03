@@ -89,8 +89,21 @@ random_dance:
     left_x_range:  [-0.55, -0.05]   # left arm -> world -x half
     right_x_range: [ 0.05,  0.55]   # right arm -> world +x half
     y_range:       [-0.30,  0.25]   # table front edge is y=+0.35
-    z_rel_range:   [ 0.08,  0.25]   # metres above table top
+    z_rel_range:   [ 0.08,  0.40]   # metres above table top
     max_retries:   8                # per-keyframe IK retries before reusing the previous pose
+    pose_perturb_deg: 20            # wrist random rotation around home EE orientation (deg); 0 = fixed orientation
+    # Reject IK solutions whose joint-space step exceeds this many radians;
+    # curobo occasionally returns equivalent configurations >1 rad away
+    # from the seed, which renders as a whip-fast wrist flick. Tightening
+    # this also makes motion feel more deliberate at the cost of needing
+    # more retries near the workspace boundary.
+    max_joint_step: 1.0
+    # The spline's segment time is stretched proportionally to the joint
+    # span whenever it exceeds ``speed_ref_rad``, clamped at ``stretch_cap``x.
+    # This keeps peak angular speed ~constant across waypoints of varying
+    # span. speed_ref_rad=0 disables the stretch.
+    speed_ref_rad:  0.8
+    stretch_cap:    3.0
   n_steps: 30
   arm_delta: 0.6        # radians (~34 deg) around home state per joint (joint mode only)
   gripper_toggle_p: 0.2
