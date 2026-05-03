@@ -17,7 +17,7 @@ camera. The robot faces +y.
 |---|---|---|
 | **Robot base** (`aloha-agilex`) | (0, −0.65, 0) | Facing +y (see `config.yml: robot_pose`). The base quaternion `[0.707, 0, 0, 0.707]` is a 90° rotation about +z. |
 | Table centre | (0, 0, 0.74) | Length 1.2 (x) × width 0.7 (y), 5 cm thick. Height configurable via `random_table_height`, see `table_z_bias`. |
-| Table-top z | 0.74 + `table_z_bias` | In practice ≈ 0.72–0.75 because of 3 cm random jitter. |
+| Table-top z | 0.74 + `table_z_bias` | Randomised per episode, see Tunable knobs. |
 | Left-half centre | (−0.3, 0, z_top) | "Left" = from robot's own POV (see §left/right). |
 | Right-half centre | (+0.3, 0, z_top) | |
 | Table front edge (toward camera) | y = +0.35 | Going past this puts the EE over empty space. |
@@ -26,9 +26,10 @@ camera. The robot faces +y.
 | **Head camera** (`head_camera`) | (−0.032, −0.45, 1.35) | Forward = (0, 0.6, −0.8); mounted on the robot, looks down at the tabletop from behind. D435 realsense. |
 | **Front camera** | (0, −0.45, 0.85) | Forward = (0, 1, −0.1); almost horizontal, shoots from the robot's own chest toward the table. |
 
-> **Reminder:** `table_z_bias` is sampled once per episode in
-> `[−random_table_height, 0]`, so every episode may have a slightly
-> different table top z. See `envs/_base_task.py::_init_task_env_`.
+> **Reminder:** `table_z_bias` is sampled **symmetrically** per episode in
+> `[−random_table_height, +random_table_height]`, so the tabletop moves
+> both up and down from the nominal 0.74 m. See
+> `envs/_base_task.py::_init_task_env_`.
 
 ---
 
@@ -158,7 +159,82 @@ Interpretation:
 
 ---
 
-## "Toward the camera" cheat-sheet
+## Tunable knobs — recommended ranges
+
+These are the main geometry-adjacent randomisation knobs with empirically
+safe ranges for the `aloha-agilex` embodiment + the default `observer`
+camera. Exceed them at your own peril (IK failures, base/tabletop
+interpenetration, or visible clipping).
+
+### `domain_randomization.random_table_height` (metres)
+
+Symmetric jitter: per-episode `table_z_bias ∈ [−h, +h]`.
+
+| Value | Effect |
+|---|---|
+| 0.00 | Table fixed at z = 0.74. Boring. |
+| 0.05 | ±5 cm jitter. Barely visible; IK untouched. |
+| **0.08 – 0.10** | **Recommended.** ±8–10 cm; clear visual variation with ~no IK cost. |
+| 0.15 | Aggressive; task-mode IK success rate starts dipping (rough estimate: 80–90 %). Good for training generalisation. |
+| ≥ 0.20 | Not recommended — table can start clipping into the robot base when sinking, and task-mode `z_rel_range` targets become unreachable when rising. |
+
+### `task.z_rel_range` (metres, relative to tabletop)
+
+EE sampling height above the (possibly jittered) table top. Tracks
+`table_z_bias` automatically.
+
+| Default | Typical safe window |
+|---|---|
+| `[0.08, 0.25]` | `[0.05, 0.30]` — below 0.05 the fingers may graze the table surface; above 0.30 the arm's reach starts failing. |
+
+### `task.left_x_range` / `task.right_x_range` (metres, world)
+
+| Default | Safe window |
+|---|---|
+| `[-0.55, -0.05]` / `[0.05, 0.55]` | `[-0.60, 0]` / `[0, 0.60]` — keep the two ranges strictly non-overlapping (≥ 5 cm gap) to prevent the two arms IK-ing to the same spot. |
+
+### `task.y_range` (metres, world)
+
+| Default | Safe window |
+|---|---|
+| `[-0.30, 0.25]` | `[-0.35, 0.30]` — table spans `y ∈ [−0.35, +0.35]`, so these limits stay strictly above the tabletop. Stretch y < −0.35 if you want the EE to reach behind the robot (IK will cope up to y ≈ −0.45). |
+
+### `task.pose_perturb_deg` (degrees)
+
+Wrist SO(3) perturbation around the home EE orientation.
+
+| Value | Feel |
+|---|---|
+| 0 | Fingers always point the same way (old behaviour). |
+| 10 | Gentle wrist wobble. |
+| **20 – 25** | **Recommended.** Clearly visible variation, IK failure < 1 %. |
+| 40+ | Expressive but IK failure climbs fast; last-attempt fallback to home quat kicks in often. |
+
+### `task.max_joint_step` (radians)
+
+Reject IK solutions whose single-joint step exceeds this. Tighter →
+smoother motion, more IK retries.
+
+| Default | Notes |
+|---|---|
+| 1.0 | Fine with the "best-of-N" retry strategy. Below ~0.6 you'll start seeing frequent "best span > cap" warnings. |
+
+### `task.speed_ref_rad` + `task.stretch_cap`
+
+`hold_substeps` per segment is stretched by `max(1, span / speed_ref_rad)`,
+clamped at `stretch_cap`. Keeps peak angular speed ~constant.
+
+| Key | Default | What to change |
+|---|---|---|
+| `speed_ref_rad` | 0.8 | Raise to 1.2 for faster overall motion; drop to 0.5 for a slow-motion dance. 0 disables stretching. |
+| `stretch_cap` | 3.0 | Raise when you see very large waypoint jumps still rendering too fast. |
+
+### `hold_substeps`
+
+Base physics-step budget per keyframe segment before stretching. 80 @
+dt = 1/250 s ⇒ **0.32 s per segment** when not stretched.
+
+
 
 When designing a new trajectory:
 
