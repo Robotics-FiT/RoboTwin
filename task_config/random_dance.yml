@@ -4,7 +4,7 @@ hdri_sun_max_elevation_deg: 80.0   # 想封顶避免阴影太短
 render_freq: 0
 # Number of episodes collected per run. Lower this while debugging (e.g. 3),
 # raise it (e.g. 50) when actually producing data for training.
-episode_num: 100
+episode_num: 1                 
 use_seed: false
 save_freq: 15
 embodiment: [aloha-agilex]
@@ -72,6 +72,13 @@ eval_video_log: true
 # consecutive segments are stitched seamlessly -- no settle phase, no
 # start-stop-start-stop stutter.
 random_dance:
+  # "joint"   : legacy random joint-space dance (default).
+  # "ik_debug": drive each arm once to the corresponding half-table centre
+  #             via IK and log the resulting joint angles. Used to validate
+  #             left/right mapping and IK before enabling task-space sampling.
+  mode: ik_debug
+  ik_debug_hover: 0.20    # metres above the table top (ik_debug mode only)
+  ik_debug_forward: 0.20  # metres toward observer camera (+y direction); 0 = table-half centre, 0.30 ~= near table front edge
   n_steps: 30
   arm_delta: 0.6        # radians (~34 deg) around home state per joint
   gripper_toggle_p: 0.2

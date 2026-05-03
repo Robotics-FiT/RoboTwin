@@ -42,14 +42,18 @@ class random_dance(Base_Task):
     # The embodiment's own ``homestate`` (e.g. all-zeros for aloha-agilex) makes
     # both arms sit vertically along the body midline, which looks cramped on
     # the observer camera. Here we pre-pose the arms with a mild shoulder abduct
-    # + shoulder lift + elbow bend so the two arms naturally spread open.
+    # + shoulder lift + elbow bend so the two arms naturally spread open and
+    # reach *forward* (toward the observer camera, +y world direction).
     # Joint order: [j1, j2, j3, j4, j5, j6] (6-DoF arm).
     #  j1: shoulder yaw   (positive -> outward abduction on each side)
-    #  j2: shoulder pitch (sign depends on URDF; tune after first rollout)
-    #  j3: elbow          (positive -> bend)
+    #  j2: shoulder pitch (positive -> arm swings forward / toward +y)
+    #  j3: elbow          (positive -> bend; smaller -> more forward reach)
     #  j4,j5,j6: wrist
-    DEFAULT_LEFT_HOME = [0.30, -0.40, 0.80, 0.0, 0.80, 0.0]
-    DEFAULT_RIGHT_HOME = [-0.30, -0.40, 0.80, 0.0, 0.80, 0.0]
+    # Tweaking to lean further forward:
+    #   - increase  j2 (shoulder pitch)   -> whole arm rotates forward
+    #   - decrease  j3 (elbow bend)       -> straighter -> longer reach
+    DEFAULT_LEFT_HOME = [0.30, 0.60, 0.40, 0.0, 0.80, 0.0]
+    DEFAULT_RIGHT_HOME = [-0.30, 0.60, 0.40, 0.0, 0.80, 0.0]
 
     def setup_demo(self, **kwargs):
         super()._init_task_env_(**kwargs)
@@ -60,6 +64,21 @@ class random_dance(Base_Task):
         self._dance_gripper_toggle_p = float(dance_cfg.get("gripper_toggle_p", self.DEFAULT_GRIPPER_TOGGLE_P))
         self._dance_hold_substeps = int(dance_cfg.get("hold_substeps", self.DEFAULT_HOLD_SUBSTEPS))
         self._dance_save_every = max(1, int(dance_cfg.get("save_every", self.DEFAULT_SAVE_EVERY)))
+
+        # ``mode`` selects the keyframe source:
+        #   "joint"   (default): legacy random joint-space sampling around home
+        #   "ik_debug": single-shot IK test. Each arm is driven to a fixed
+        #               Cartesian target (table-half centre hovering above
+        #               the table) and the resulting joint angles are printed.
+        self._dance_mode = str(dance_cfg.get("mode", "joint")).lower()
+        # Hover height (metres) above the table top used by ik_debug mode.
+        self._dance_ik_debug_hover = float(dance_cfg.get("ik_debug_hover", 0.20))
+        # Forward offset along world +y (metres), i.e. "toward the observer
+        # camera". 0 = table-half centre (y=0). Positive values push the IK
+        # target closer to the camera; max reasonable is ~0.30 before the
+        # target leaves the tabletop (table width is 0.7 -> front edge at
+        # y=+0.35).
+        self._dance_ik_debug_forward = float(dance_cfg.get("ik_debug_forward", 0.20))
 
         # Dance home: explicit yaml override > built-in default > embodiment homestate.
         n_left = len(self.robot.left_arm_joints)
@@ -247,6 +266,135 @@ class random_dance(Base_Task):
             # comparable to the previous _drive_to_keyframe implementation).
             self._take_picture()
 
+    # ------------------------------------------------------------------
+    # Task-space (IK) debug mode
+    # ------------------------------------------------------------------
+    def _plan_ik_for_arm(self, target_xyz, arm_tag):
+        """Run IK for ``arm_tag`` to reach ``target_xyz`` while *keeping*
+        the current end-effector orientation -- i.e. only ask the planner
+        to move the EE position. This is the most robust thing for debug
+        reachability tests: any orientation constraint (like "fingers down")
+        drastically shrinks the reachable set and is the #1 reason IK fails
+        for nearby targets.
+
+        Returns
+        -------
+        qpos : np.ndarray(ndof,) of float
+            Planned final joint configuration (arm joints only, no gripper).
+        ee_pose : list[float] of length 7
+            The EE pose at the time of planning (before replay).
+        """
+        if arm_tag == "left":
+            ee_pose_now = self.robot.get_left_ee_pose()
+        else:
+            ee_pose_now = self.robot.get_right_ee_pose()
+
+        # Keep the current orientation (quaternion), change only position.
+        qw, qx, qy, qz = ee_pose_now[3], ee_pose_now[4], ee_pose_now[5], ee_pose_now[6]
+        target_pose = [
+            float(target_xyz[0]), float(target_xyz[1]), float(target_xyz[2]),
+            float(qw), float(qx), float(qy), float(qz),
+        ]
+
+        if arm_tag == "left":
+            plan = self.robot.left_plan_path(target_pose)
+        else:
+            plan = self.robot.right_plan_path(target_pose)
+
+        if plan is None or plan.get("status") != "Success":
+            return None, ee_pose_now
+        final_qpos = np.asarray(plan["position"][-1], dtype=np.float64)
+        return final_qpos, ee_pose_now
+
+    def _play_ik_debug(self, left_home, right_home,
+                       left_grip, right_grip):
+        """Drive each arm to a hover pose above the corresponding half of
+        the table (left arm -> +x half, right arm -> -x half), print the
+        resulting joint state, and stop. Used to validate that the IK and
+        workspace mapping are correct before enabling random task-space
+        sampling in the main dance loop.
+        """
+        # Table-frame centre of each half (relative to the table's own
+        # centre, which itself is offset by ``self.table_xy_bias``). The
+        # table is 1.2 m long (x) and 0.7 m wide (y) -- see
+        # Base_Task.create_table_and_wall.
+        #
+        # *** Left/right mapping ***
+        # Confirmed by printing ``get_left_ee_pose()`` / ``get_right_ee_pose()``
+        # at home for the aloha-agilex embodiment:
+        #   left EE  sits at x = -0.298  (so left arm owns the -x half)
+        #   right EE sits at x = +0.306  (so right arm owns the +x half)
+        # i.e. the *urdf's* "left arm" is actually on world -x. We therefore
+        # aim the left arm at (-0.3, ...) and the right arm at (+0.3, ...).
+        #
+        # Positive ``forward`` pushes the target toward the observer camera
+        # (world +y).
+        table_x_bias, table_y_bias = self.table_xy_bias
+        table_top_z = 0.74 + self.table_z_bias  # matches create_table_and_wall
+        hover_z = table_top_z + self._dance_ik_debug_hover
+        fwd_y = self._dance_ik_debug_forward
+
+        left_target = np.array([table_x_bias - 0.3, table_y_bias + fwd_y, hover_z])
+        right_target = np.array([table_x_bias + 0.3, table_y_bias + fwd_y, hover_z])
+
+        print("\033[96m[ik-debug]\033[0m table_top_z = "
+              f"{table_top_z:.3f}  hover_z = {hover_z:.3f}  forward_y = {fwd_y:.3f}")
+        print(f"\033[96m[ik-debug]\033[0m left  target world pos = {left_target}")
+        print(f"\033[96m[ik-debug]\033[0m right target world pos = {right_target}")
+
+        # Before any IK we log where each EE currently sits so we can sanity-
+        # check the sign convention (+x side vs -x side).
+        left_ee_before = self.robot.get_left_ee_pose()
+        right_ee_before = self.robot.get_right_ee_pose()
+        print(f"\033[96m[ik-debug]\033[0m left  EE @ home = "
+              f"[{left_ee_before[0]:+.3f}, {left_ee_before[1]:+.3f}, {left_ee_before[2]:+.3f}]")
+        print(f"\033[96m[ik-debug]\033[0m right EE @ home = "
+              f"[{right_ee_before[0]:+.3f}, {right_ee_before[1]:+.3f}, {right_ee_before[2]:+.3f}]")
+
+        l_q, _ = self._plan_ik_for_arm(left_target, "left")
+        r_q, _ = self._plan_ik_for_arm(right_target, "right")
+
+        if l_q is None:
+            print("\033[91m[ik-debug] left  IK FAILED -> keeping home\033[0m")
+            l_q = left_home.copy()
+        if r_q is None:
+            print("\033[91m[ik-debug] right IK FAILED -> keeping home\033[0m")
+            r_q = right_home.copy()
+
+        # Replace the planned path with a two-waypoint list: (home) -> (IK
+        # result, held). We repeat the IK result so the spline plays
+        # "go to target and stop" without wobbling past it.
+        self.left_joint_path = [
+            {"arm": l_q.tolist(), "gripper": left_grip},
+            {"arm": l_q.tolist(), "gripper": left_grip},
+        ]
+        self.right_joint_path = [
+            {"arm": r_q.tolist(), "gripper": right_grip},
+            {"arm": r_q.tolist(), "gripper": right_grip},
+        ]
+
+        left_waypoints = [left_home.copy(), l_q, l_q]
+        right_waypoints = [right_home.copy(), r_q, r_q]
+        left_grips = [left_grip, left_grip, left_grip]
+        right_grips = [right_grip, right_grip, right_grip]
+        self._drive_spline(left_waypoints, right_waypoints, left_grips, right_grips)
+
+        # Report where the arms actually ended up + the j1..j3 values requested.
+        left_ee_after = self.robot.get_left_ee_pose()
+        right_ee_after = self.robot.get_right_ee_pose()
+        l_err = np.linalg.norm(np.array(left_ee_after[:3]) - left_target)
+        r_err = np.linalg.norm(np.array(right_ee_after[:3]) - right_target)
+        print("\033[92m[ik-debug] result\033[0m ----------------------------")
+        print(f"  left  qpos (j1..jN): {np.round(l_q, 3).tolist()}")
+        print(f"  left  j1,j2,j3     : {float(l_q[0]):+.3f}, {float(l_q[1]):+.3f}, {float(l_q[2]):+.3f}")
+        print(f"  left  EE reached   : [{left_ee_after[0]:+.3f}, {left_ee_after[1]:+.3f}, {left_ee_after[2]:+.3f}]")
+        print(f"  left  EE error     : {l_err*1000:.1f} mm")
+        print(f"  right qpos (j1..jN): {np.round(r_q, 3).tolist()}")
+        print(f"  right j1,j2,j3     : {float(r_q[0]):+.3f}, {float(r_q[1]):+.3f}, {float(r_q[2]):+.3f}")
+        print(f"  right EE reached   : [{right_ee_after[0]:+.3f}, {right_ee_after[1]:+.3f}, {right_ee_after[2]:+.3f}]")
+        print(f"  right EE error     : {r_err*1000:.1f} mm")
+        print("\033[92m[ik-debug] end\033[0m ----------------------------")
+
     def play_once(self):
         # Use the task-level "dance home" (not the embodiment homestate) as the
         # sampling centre so the arms start in a spread-open pose.
@@ -257,6 +405,31 @@ class random_dance(Base_Task):
         left_grip = float(self.robot.get_left_gripper_val() or 0.0)
         right_grip = float(self.robot.get_right_gripper_val() or 0.0)
 
+        # -- IK DEBUG MODE -----------------------------------------------
+        if self._dance_mode == "ik_debug":
+            # Only run the debug trajectory on the first pass (need_plan=True).
+            # Subsequent replays just follow whatever we recorded.
+            if self.need_plan:
+                self._play_ik_debug(left_home, right_home, left_grip, right_grip)
+            else:
+                # Replay path: use whatever IK joint angles were saved.
+                left_waypoints = [left_home.copy()]
+                right_waypoints = [right_home.copy()]
+                left_grips = [left_grip]
+                right_grips = [right_grip]
+                n = min(len(self.left_joint_path), len(self.right_joint_path))
+                for i in range(n):
+                    l_kf = self.left_joint_path[i]
+                    r_kf = self.right_joint_path[i]
+                    left_waypoints.append(np.asarray(l_kf["arm"], dtype=np.float64))
+                    right_waypoints.append(np.asarray(r_kf["arm"], dtype=np.float64))
+                    left_grips.append(float(l_kf["gripper"]))
+                    right_grips.append(float(r_kf["gripper"]))
+                self._drive_spline(left_waypoints, right_waypoints, left_grips, right_grips)
+            self.info["info"] = {"{A}": "random_dance", "{a}": "dual"}
+            return self.info
+
+        # -- DEFAULT JOINT-SPACE DANCE -----------------------------------
         if self.need_plan:
             # ---------- generate a fresh random dance ----------
             self.left_joint_path = []
