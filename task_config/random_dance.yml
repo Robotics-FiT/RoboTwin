@@ -4,7 +4,7 @@ hdri_sun_max_elevation_deg: 80.0   # 想封顶避免阴影太短
 render_freq: 0
 # Number of episodes collected per run. Lower this while debugging (e.g. 3),
 # raise it (e.g. 50) when actually producing data for training.
-episode_num: 100                 
+episode_num: 150
 use_seed: false
 save_freq: 15
 embodiment: [aloha-agilex]
