@@ -57,7 +57,7 @@ class Base_Task(gym.Env):
         ta.setup_logging("CRITICAL")  # hide logging
         np.random.seed(kwags.get("seed", 0))
         torch.manual_seed(kwags.get("seed", 0))
-        # random.seed(kwags.get('seed', 0))
+        random.seed(kwags.get('seed', 0))
 
         self.FRAME_IDX = 0
         self.task_name = kwags.get("task_name")
@@ -211,7 +211,10 @@ class Base_Task(gym.Env):
         # give renderer to sapien sim
         self.engine.set_renderer(self.renderer)
 
-        sapien.render.set_camera_shader_dir("default")
+        sapien.render.set_camera_shader_dir("rt")
+        sapien.render.set_ray_tracing_samples_per_pixel(32)
+        sapien.render.set_ray_tracing_path_depth(8)
+        sapien.render.set_ray_tracing_denoiser("oidn")
 
         # declare sapien scene
         scene_config = sapien.SceneConfig()
@@ -311,8 +314,12 @@ class Base_Task(gym.Env):
             texture_id=self.table_texture,
         )
 
-    def get_cluttered_table(self, cluttered_numbers=10, xlim=[-0.59, 0.59], ylim=[-0.34, 0.34], zlim=[0.741]):
+    def get_cluttered_table(self, cluttered_numbers=10, xlim=None, ylim=None, zlim=None):
         self.record_cluttered_objects = []  # record cluttered objects
+
+        xlim = list(xlim) if xlim is not None else [-0.59, 0.59]
+        ylim = list(ylim) if ylim is not None else [-0.34, 0.34]
+        zlim = list(zlim) if zlim is not None else [0.741]
 
         xlim[0] += self.table_xy_bias[0]
         xlim[1] += self.table_xy_bias[0]
@@ -1484,8 +1491,8 @@ class Base_Task(gym.Env):
         self.take_action_cnt += 1
         print(f"step: \033[92m{self.take_action_cnt} / {self.step_lim}\033[0m", end="\r")
 
-        self._update_render()
         if self.render_freq:
+            self._update_render()
             self.viewer.render()
 
         actions = np.array([action])
@@ -1622,6 +1629,7 @@ class Base_Task(gym.Env):
         right_gripper = np.array(right_gripper)
 
         now_left_id, now_right_id = 0, 0
+        control_idx = 0
 
         # ========== Control Loop ==========
         while now_left_id < left_n_step or now_right_id < right_n_step:
@@ -1649,8 +1657,12 @@ class Base_Task(gym.Env):
                 now_right_id += 1
 
             self.scene.step()
-            self._update_render()
-                
+
+            if self.render_freq and control_idx % self.render_freq == 0:
+                self._update_render()
+                self.viewer.render()
+            control_idx += 1
+
             if self.check_success():
                 self.eval_success = True
                 self.get_obs() # update obs
@@ -1658,8 +1670,8 @@ class Base_Task(gym.Env):
                     self.eval_video_ffmpeg.stdin.write(self.now_obs["observation"]["head_camera"]["rgb"].tobytes())
                 return
 
-        self._update_render()
         if self.render_freq:  # UI
+            self._update_render()
             self.viewer.render()
 
 
