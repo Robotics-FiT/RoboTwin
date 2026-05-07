@@ -66,13 +66,17 @@ class random_dance(Base_Task):
         self._dance_save_every = max(1, int(dance_cfg.get("save_every", self.DEFAULT_SAVE_EVERY)))
 
         # ``mode`` selects the keyframe source:
-        #   "joint"    (default): legacy random joint-space sampling around home
-        #   "task"     : random end-effector (Cartesian) sampling per arm,
-        #                each arm restricted to its own half of the table;
-        #                keyframe orientation is inherited from the current EE
-        #                pose so the planner only has to solve for position.
-        #   "ik_debug" : single-shot IK test at fixed target(s), logs joint
-        #                angles. Used to validate reach/mapping.
+        #   "joint"      (default): legacy random joint-space sampling around home
+        #   "task"       : random end-effector (Cartesian) sampling per arm,
+        #                  each arm restricted to its own half of the table;
+        #                  keyframe orientation is inherited from the current EE
+        #                  pose so the planner only has to solve for position.
+        #   "ik_debug"   : single-shot IK test at fixed target(s), logs joint
+        #                  angles. Used to validate reach/mapping.
+        #   "home_debug" : drive to the configured ``left_home``/``right_home``
+        #                  and hold. Useful for iterating on the dance home
+        #                  joint values without the IK step moving the arms
+        #                  off the pose you are trying to inspect.
         self._dance_mode = str(dance_cfg.get("mode", "joint")).lower()
         # Hover height (metres) above the table top used by ik_debug mode.
         self._dance_ik_debug_hover = float(dance_cfg.get("ik_debug_hover", 0.20))
@@ -82,6 +86,14 @@ class random_dance(Base_Task):
         # target leaves the tabletop (table width is 0.7 -> front edge at
         # y=+0.35).
         self._dance_ik_debug_forward = float(dance_cfg.get("ik_debug_forward", 0.20))
+
+        # home_debug-only knob: force grippers to this normalised value
+        # (0 = close, 1 = open) while holding the dance home pose. None
+        # means "leave them at whatever they are (usually 0)".
+        hd_grip = dance_cfg.get("home_debug_gripper", None)
+        self._dance_home_debug_gripper = (
+            None if hd_grip is None else float(hd_grip)
+        )
 
         # Task-space sampling box ('task' mode only). Each arm samples a
         # target inside its own [xmin, xmax] x [ymin, ymax] x [zmin, zmax]
@@ -119,6 +131,40 @@ class random_dance(Base_Task):
         # clamped to [1x, stretch_cap x] of ``hold_substeps``.
         self._dance_task_speed_ref_rad = float(task_cfg.get("speed_ref_rad", 0.8))
         self._dance_task_stretch_cap = float(task_cfg.get("stretch_cap", 3.0))
+
+        # Named presets. These are thin shortcuts that overwrite the
+        # keyframe count / per-segment hold so you can switch between
+        # "dance personalities" from the yaml without re-tuning every
+        # knob. A preset only overrides the fields listed in its dict;
+        # anything else (task box, pose_perturb_deg, ...) is inherited
+        # from the explicit yaml values above. Pick "default" (or leave
+        # ``preset`` unset) to keep the legacy behaviour.
+        #
+        #   default : 30 keyframes, 80 substeps/segment  (baseline)
+        #   slow    : 10 keyframes, 160 substeps/segment (half the key
+        #             poses, each traversed twice as slowly -> calmer,
+        #             more deliberate motion; same wall-clock per episode)
+        _PRESETS = {
+            "default": {},
+            "slow":    {"n_steps": 10, "hold_substeps": 160},
+        }
+        preset_name = str(dance_cfg.get("preset", "default")).lower()
+        preset_over = _PRESETS.get(preset_name)
+        if preset_over is None:
+            print(f"[random_dance] WARNING: unknown preset '{preset_name}', "
+                  f"falling back to 'default'. Known presets: {list(_PRESETS)}")
+            preset_name = "default"
+            preset_over = {}
+        # Only overwrite when the user did NOT explicitly set the field
+        # in the yaml -- that way a yaml value always wins over a preset
+        # default, so you can e.g. pick `slow` but bump `n_steps` to 12.
+        if "n_steps" not in dance_cfg and "n_steps" in preset_over:
+            self._dance_n_steps = int(preset_over["n_steps"])
+        if "hold_substeps" not in dance_cfg and "hold_substeps" in preset_over:
+            self._dance_hold_substeps = int(preset_over["hold_substeps"])
+        print(f"[random_dance] preset='{preset_name}' -> "
+              f"n_steps={self._dance_n_steps}, "
+              f"hold_substeps={self._dance_hold_substeps}")
 
         # Dance home: explicit yaml override > built-in default > embodiment homestate.
         n_left = len(self.robot.left_arm_joints)
@@ -766,6 +812,54 @@ class random_dance(Base_Task):
                     left_grips.append(float(l_kf["gripper"]))
                     right_grips.append(float(r_kf["gripper"]))
                 self._drive_spline(left_waypoints, right_waypoints, left_grips, right_grips)
+            self.info["info"] = {"{A}": "random_dance", "{a}": "dual"}
+            return self.info
+
+        # -- HOME DEBUG MODE ---------------------------------------------
+        # Drive to the configured dance home and hold, no IK, no sampling.
+        # Intended for eyeballing / iterating on ``left_home``/``right_home``
+        # values without the IK step overwriting the held pose.
+        if self._dance_mode == "home_debug":
+            # Optional yaml override: set ``home_debug_gripper`` to a float
+            # in [0, 1] (0 = close, 1 = open) to force the grippers to a
+            # particular state while inspecting the home pose. Default is
+            # "whatever they currently hold" (i.e. usually 0 = closed).
+            hd_grip = getattr(self, "_dance_home_debug_gripper", None)
+            if hd_grip is not None:
+                left_grip = float(np.clip(hd_grip, 0.0, 1.0))
+                right_grip = float(np.clip(hd_grip, 0.0, 1.0))
+
+            # Duplicate the home waypoint so the spline plays
+            # (current_pose -> home -> hold). Three copies give a calm
+            # hold phase for video inspection.
+            left_waypoints = [left_home.copy(), left_home.copy(), left_home.copy()]
+            right_waypoints = [right_home.copy(), right_home.copy(), right_home.copy()]
+            left_grips = [left_grip, left_grip, left_grip]
+            right_grips = [right_grip, right_grip, right_grip]
+            self._drive_spline(left_waypoints, right_waypoints, left_grips, right_grips)
+
+            # Log the *actual* EE poses once we're settled at home -- this
+            # is the thing to eyeball when tuning shoulder yaw / pitch /
+            # elbow values. Compare against shoulder positions and upper-
+            # arm / forearm lengths to check "arm vertical" etc.
+            left_ee = self.robot.get_left_ee_pose()
+            right_ee = self.robot.get_right_ee_pose()
+            print("\033[92m[home-debug]\033[0m "
+                  f"requested left  home qpos = {np.round(left_home, 3).tolist()}")
+            print("\033[92m[home-debug]\033[0m "
+                  f"requested right home qpos = {np.round(right_home, 3).tolist()}")
+            print("\033[92m[home-debug]\033[0m "
+                  f"left  EE @ home = [{left_ee[0]:+.3f}, {left_ee[1]:+.3f}, {left_ee[2]:+.3f}]")
+            print("\033[92m[home-debug]\033[0m "
+                  f"right EE @ home = [{right_ee[0]:+.3f}, {right_ee[1]:+.3f}, {right_ee[2]:+.3f}]")
+            print("\033[92m[home-debug]\033[0m "
+                  f"grippers set to left={left_grip:.2f}, right={right_grip:.2f} "
+                  f"(0=close, 1=open)")
+            # Approx shoulder world position for aloha-agilex
+            # (see _play_ik_debug comment); handy for sanity checks.
+            print("\033[92m[home-debug]\033[0m "
+                  f"(shoulder approx: left=(-0.30, -0.42, 0.78), "
+                  f"right=(+0.30, -0.42, 0.78); upper arm ~0.25m, forearm ~0.26m)")
             self.info["info"] = {"{A}": "random_dance", "{a}": "dual"}
             return self.info
 

@@ -70,6 +70,14 @@ Order inside `arm_joints_name`:
 `[fl_joint1, fl_joint2, fl_joint3, fl_joint4, fl_joint5, fl_joint6]`
 (and the mirror for `fr_*`).
 
+> **Heads up — these directional intuitions only hold near the original
+> spread-forward home `[0.30, 0.60, 0.40, 0, 0.80, 0]`.** Several joints
+> (notably j3 because of `link3`'s built-in `rpy="π"` flip) reverse
+> their effective direction once you push past ~π/4. For poses far from
+> that home, read the URDF axes directly and verify with `home_debug`.
+> See **`docs/dance_home_tuning.md`** for the full method, the
+> verification ruler, and the final L-shape pose.
+
 | # | URDF joint | Role | Sign convention (confirmed by `DEFAULT_LEFT_HOME`) |
 |---|---|---|---|
 | j1 | fl_joint1 | shoulder **yaw** | +: outward abduction (away from body midline) |
@@ -233,6 +241,20 @@ clamped at `stretch_cap`. Keeps peak angular speed ~constant.
 
 Base physics-step budget per keyframe segment before stretching. 80 @
 dt = 1/250 s ⇒ **0.32 s per segment** when not stretched.
+
+### `preset` (motion personality)
+
+Thin shortcut that overrides `n_steps` and `hold_substeps` without
+forcing you to re-tune every other knob. Explicit yaml values **always
+win** over a preset, so you can e.g. pick `slow` but bump `n_steps` to 12.
+
+| Preset | `n_steps` | `hold_substeps` | Feel |
+|---|---|---|---|
+| `default` | 30 | 80  | Baseline -- ~0.32 s per segment, lively. |
+| `slow`    | 10 | 160 | Half as many key poses, each held twice as long. Calmer / more deliberate; same wall-clock per episode. Good when you want the policy to emphasise steady-state poses over transitions. |
+
+Adding a new preset: edit the `_PRESETS` dict at the top of
+`random_dance.setup_demo` in `envs/random_dance.py`.
 
 
 

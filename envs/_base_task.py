@@ -93,24 +93,31 @@ class Base_Task(gym.Env):
         self.step_lim = None
         self.fix_gripper = False
         # ---- HDRI random selection (seeded, reproducible) ----------------
-        # Pick one HDRI for the *entire episode* from a pool of candidate .exr
-        # files, then inject it into ``kwags["environment_map"]`` so the rest
-        # of the pipeline (setup_scene loads it; estimate_sun_from_hdri pulls
-        # the dominant directional light from *that* HDRI; load_camera rotates
-        # it per-episode) works without further changes.
+        # Opt-in. Only tasks that ask for it (via ``use_environment_map: true``
+        # in their yaml, OR by explicitly setting ``environment_map`` to a
+        # path) get an HDRI skybox + IBL. Everything else (e.g. demo_clean,
+        # the original RoboTwin tasks) falls back to SAPIEN's default solid
+        # skybox + the legacy directional light, exactly like before HDRIs
+        # were added.
         #
         # Accepted yaml keys (all optional):
+        #   use_environment_map: bool. Master switch. When true and no
+        #       explicit ``environment_map`` is given, draw one .exr at
+        #       random from ``environment_map_pool``.
         #   environment_map_pool: either a glob pattern (str) matched by
         #       ``glob.glob``, a directory path (every .exr under it is used),
         #       or an explicit list of paths. Relative paths are resolved
         #       against the repo root.
         #       Default: ``assets/scenes/HDRIs/*.exr``.
         #   environment_map: if the user *explicitly* sets this, it wins and
-        #       the pool is ignored (back-compat).
+        #       the pool is ignored (back-compat / testing override). Setting
+        #       it implicitly enables the HDRI path.
         #
         # The random choice uses a dedicated RNG seeded from the episode seed
         # so it is deterministic and does not consume the global np.random.
-        if "environment_map" not in kwags or kwags.get("environment_map") in (None, ""):
+        explicit_env_map = kwags.get("environment_map") not in (None, "", False)
+        wants_hdri = bool(kwags.get("use_environment_map", False)) or explicit_env_map
+        if wants_hdri and not explicit_env_map:
             pool_spec = kwags.get("environment_map_pool",
                                   "assets/scenes/HDRIs/*.exr")
             pool_paths = self._resolve_env_map_pool(pool_spec)
@@ -123,6 +130,10 @@ class Base_Task(gym.Env):
                 print(f"\033[96m[hdri]\033[0m episode {kwags.get('now_ep_num', 0)} "
                       f"(seed={_base_seed})  -> {os.path.basename(chosen)}  "
                       f"(pool size = {len(pool_paths)})")
+            else:
+                print(f"\033[93m[hdri][warn]\033[0m use_environment_map=true but "
+                      f"no .exr files found under spec '{pool_spec}'. "
+                      f"Falling back to default skybox.\033[0m")
         # Forward the task-config kwargs so ``setup_scene`` can read
         # ``shadow_catcher``, ``environment_map`` etc. straight from the yaml.
         self.setup_scene(**kwags)
@@ -337,18 +348,16 @@ class Base_Task(gym.Env):
                 from .utils import estimate_ground_color_from_hdri
                 catcher_color = kwargs.get("shadow_catcher_color")
                 if catcher_color is None:
-                    default_env_map_for_color = os.path.join(
-                        parent_directory, "..", "assets", "scenes", "HDRIs",
-                        "grasslands_sunset_4k.exr",
-                    )
-                    _em = kwargs.get("environment_map", default_env_map_for_color)
-                    if isinstance(_em, str):
+                    # Sample a tint from the HDRI's below-horizon band when
+                    # one is in use; otherwise just go with a neutral grey.
+                    _em = kwargs.get("environment_map", None)
+                    catcher_color = [0.3, 0.3, 0.3]
+                    if isinstance(_em, str) and _em:
                         _em_path = _em if os.path.isabs(_em) else os.path.normpath(
                             os.path.join(parent_directory, "..", _em))
                         col = estimate_ground_color_from_hdri(_em_path)
-                        catcher_color = col.tolist() if col is not None else [0.3, 0.3, 0.3]
-                    else:
-                        catcher_color = [0.3, 0.3, 0.3]
+                        if col is not None:
+                            catcher_color = col.tolist()
 
                 catcher_size = kwargs.get("shadow_catcher_size", 10.0)
                 catcher_z = kwargs.get("ground_height", 0) + kwargs.get("shadow_catcher_z_bias", 0.001)
@@ -375,11 +384,21 @@ class Base_Task(gym.Env):
             kwargs.get("dynamic_friction", 0.5),
             kwargs.get("restitution", 0),
         )
-        # Ambient light: default to fully off. HDRI IBL already provides
-        # ample soft fill illumination for diffuse and specular components,
-        # so any extra ambient term would just wash out shadows. Still
-        # overridable via the ``ambient_light`` kwarg.
-        self.scene.set_ambient_light(kwargs.get("ambient_light", [0.0, 0.0, 0.0]))
+        # Ambient light. Two regimes:
+        #   - HDRI is active (loaded_env_map_path != None): IBL already
+        #     provides ample soft fill. A non-zero ambient term on top of
+        #     that just washes out the HDRI sun's shadows, so we force
+        #     ambient to black unless the user explicitly overrides.
+        #   - No HDRI (default skybox): we restore the original RoboTwin
+        #     default of [0.5, 0.5, 0.5] so demo_clean / demo_randomized /
+        #     other legacy tasks render at the same brightness as upstream.
+        # Either regime can be overridden per-task via ``ambient_light``.
+        # (Note: this block runs *before* environment_map is loaded a few
+        # lines below; we don't know loaded_env_map_path yet, so look at
+        # whether an environment map was *requested* instead.)
+        _env_map_requested = kwargs.get("environment_map", None) not in (None, "", False)
+        _default_ambient = [0.0, 0.0, 0.0] if _env_map_requested else [0.5, 0.5, 0.5]
+        self.scene.set_ambient_light(kwargs.get("ambient_light", _default_ambient))
 
         # Environment map (HDRI skybox + image-based lighting). Replaces the
         # default solid-colour skybox, both for what the camera sees when it
@@ -388,13 +407,12 @@ class Base_Task(gym.Env):
         # (e.g. .exr / .hdr) or a pre-built cubemap.
         #   - ``environment_map``: path (str) or ``sapien.render.RenderCubemap``.
         #     Resolved relative to the repo root when a relative path is given.
-        #     Set to ``None`` / empty string to explicitly disable.
-        # Defaults to the grasslands HDRI we ship under assets/scenes/HDRIs/.
-        default_env_map = os.path.join(
-            parent_directory, "..", "assets", "scenes", "HDRIs",
-            "grasslands_sunset_4k.exr",
-        )
-        env_map = kwargs.get("environment_map", default_env_map)
+        #     Set to ``None`` / empty string / not-present to explicitly disable.
+        # NO implicit default: opt-in via ``use_environment_map: true`` (which
+        # makes ``_init_task_env_`` pick one from the pool) or by setting
+        # ``environment_map`` directly. Tasks that do neither stay on SAPIEN's
+        # default solid skybox + legacy directional fill light.
+        env_map = kwargs.get("environment_map", None)
         loaded_env_map_path = None  # remember for later (sun extraction)
         if env_map:
             try:
@@ -490,12 +508,21 @@ class Base_Task(gym.Env):
                     shadow_far=shadow_far,
                     shadow_map_size=shadow_map_size,
                 ))
-        # Point lights: default to none. The HDRI + HDRI-derived directional
-        # sun together cover both the IBL fill and the hard-shadow key light;
-        # adding default point lights would re-light the shadow regions and
-        # dilute the HDRI sun's shadow contrast. Users can still opt-in via
-        # ``point_lights=[[pos, colour], ...]`` in the task config.
-        point_lights = kwargs.get("point_lights", [])
+        # Point lights. Two regimes (mirrors the ambient logic):
+        #   - HDRI active: HDRI IBL + HDRI-derived sun together provide
+        #     fill + key. Adding extra point lights would relight shadow
+        #     regions and dilute the HDRI sun's hard-shadow contrast.
+        #     Default to none.
+        #   - No HDRI: restore the upstream RoboTwin default of two
+        #     symmetric overhead white point lights. Without them, legacy
+        #     tasks (demo_clean / demo_randomized / ...) lose the bright
+        #     tabletop fill they were authored against.
+        if loaded_env_map_path is not None:
+            _default_point_lights = []
+        else:
+            _default_point_lights = [[[1, 0, 1.8], [1, 1, 1]],
+                                     [[-1, 0, 1.8], [1, 1, 1]]]
+        point_lights = kwargs.get("point_lights", _default_point_lights)
         self.point_light_lst = []
         for point_light in point_lights:
             if self.random_light:
