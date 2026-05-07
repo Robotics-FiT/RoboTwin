@@ -781,6 +781,43 @@ class random_dance(Base_Task):
         print(f"  right EE error     : {r_err*1000:.1f} mm")
         print("\033[92m[ik-debug] end\033[0m ----------------------------")
 
+    def _settle_to_dance_home(self, left_home, right_home,
+                              left_grip, right_grip):
+        """Drive the robot from its current pose to the dance home and
+        hold there until physics has actually converged.
+
+        Why this exists. The base class's ``move_to_homestate`` only sets
+        the PD drive *target* to the embodiment homestate (typically all
+        zeros for aloha-agilex) -- it does not call ``scene.step`` so no
+        physics is integrated, which means at the start of ``play_once``
+        the robot is still near the embodiment's home, NOT at our task-
+        level dance home. Without this settle phase the very first
+        Catmull-Rom segment ``home -> keyframe_1`` plays out while the
+        joints are still racing toward home, so the dance never visibly
+        passes through the dance-home pose at all (the user would see
+        the robot mostly skip home and lurch directly toward the first
+        IK waypoint).
+
+        We side-step that by driving a tiny three-waypoint spline
+        ``[current, home, home]`` first. The current-pose waypoint is
+        read straight off the articulation, so the spline knows where
+        the joints really are. The duplicated home at the end gives PD
+        a full segment to converge before the main dance starts.
+        """
+        # Read the *physical* current arm qpos (drop the gripper which
+        # ``get_left_arm_real_jointState`` appends at the end).
+        cur_left = np.asarray(
+            self.robot.get_left_arm_real_jointState()[:-1], dtype=np.float64)
+        cur_right = np.asarray(
+            self.robot.get_right_arm_real_jointState()[:-1], dtype=np.float64)
+        # ``[current, home, home]`` so PD has time to settle on home.
+        left_waypoints = [cur_left, left_home.copy(), left_home.copy()]
+        right_waypoints = [cur_right, right_home.copy(), right_home.copy()]
+        left_grips = [left_grip, left_grip, left_grip]
+        right_grips = [right_grip, right_grip, right_grip]
+        self._drive_spline(left_waypoints, right_waypoints,
+                           left_grips, right_grips)
+
     def play_once(self):
         # Use the task-level "dance home" (not the embodiment homestate) as the
         # sampling centre so the arms start in a spread-open pose.
@@ -892,6 +929,15 @@ class random_dance(Base_Task):
                         right_grip = float(np.random.uniform(0.0, 1.0))
                     self.left_joint_path.append({"arm": l_arm.tolist(), "gripper": left_grip})
                     self.right_joint_path.append({"arm": r_arm.tolist(), "gripper": right_grip})
+            # -- Settle to dance home before the dance starts ------------
+            # See ``_settle_to_dance_home`` docstring. Without this the
+            # very first dance segment starts before the robot has
+            # reached home, so the home pose is never actually held.
+            # Run for both fresh-sampled and replayed paths so the held
+            # video frames at the start are consistent.
+            self._settle_to_dance_home(left_home, right_home,
+                                       left_grip, right_grip)
+
             # -- Play back (fresh or replayed traj data) ------------------
             left_waypoints = [left_home.copy()]
             right_waypoints = [right_home.copy()]
@@ -931,6 +977,13 @@ class random_dance(Base_Task):
                     "arm": r_arm.tolist(),
                     "gripper": right_grip,
                 })
+
+        # Settle to dance home so the very first played-back segment
+        # actually starts from home (and not from wherever PD happened
+        # to be when ``play_once`` was called). See
+        # ``_settle_to_dance_home`` docstring.
+        self._settle_to_dance_home(left_home, right_home,
+                                   left_grip, right_grip)
 
         # Build the full waypoint / gripper lists. Index 0 is the current
         # pose (dance home); 1..N are the sampled keyframes. Works for both

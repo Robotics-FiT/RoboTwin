@@ -141,14 +141,15 @@ random_dance:
   hold_substeps: 80     # physics substeps per keyframe segment
   save_every: 8         # save one observation every N substeps
   # Centre of the random joint sampling (task-level "dance home", independent of
-  # the embodiment's homestate). Tweak so both arms spread open and face the
-  # observer camera. Joint order: [j1 shoulder-yaw, j2 shoulder-pitch,
-  # j3 elbow, j4, j5 wrist-pitch, j6]. Comment out to fall back to the
-  # built-in defaults in envs/random_dance.py.
-  #
-  # See random_dance.yml for the design rationale behind these values.
-  # Previous (folded) values:
-  #   left_home:  [ 0.30, 0.40, 0.80, 0.0, 0.80, 0.0]
-  #   right_home: [-0.30, 0.40, 0.80, 0.0, 0.80, 0.0]
-  left_home:  [ 1.10, 0.10, 0.10, 0.0, 0.10, 0.0]
-  right_home: [-1.10, 0.10, 0.10, 0.0, 0.10, 0.0]
+  # the embodiment's homestate). Same L-shape pose as random_dance.yml --
+  # upper arm vertical, forearm horizontal + 90 deg wrt upper arm, grippers
+  # open and mirrored. See docs/dance_home_tuning.md for the full design
+  # rationale and tuning history.
+  # Joint order: [j1 shoulder-yaw, j2 shoulder-pitch, j3 elbow, j4,
+  # j5 wrist-roll, j6]. Note: j1 and j5 are mirrored per arm; j2/j3/j4/j6
+  # keep the same sign.
+  # Previous attempts kept here for reference:
+  #   [ 0.30, 0.40, 0.80, 0.0, 0.80, 0.0]   # folded forward (original)
+  #   [ 1.10, 0.10, 0.10, 0.0, 0.10, 0.0]   # spread open, flat
+  left_home:  [ 1.10, 1.5708, 1.5708, 0.0,  1.5708, 0.0]
+  right_home: [-1.10, 1.5708, 1.5708, 0.0, -1.5708, 0.0]

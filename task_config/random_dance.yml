@@ -13,7 +13,7 @@ hdri_sun_max_elevation_deg: 80.0   # 想封顶避免阴影太短
 render_freq: 0
 # Number of episodes collected per run. Lower this while debugging (e.g. 3),
 # raise it (e.g. 50) when actually producing data for training.
-episode_num: 2
+episode_num: 10
 use_seed: false
 save_freq: 15
 embodiment: [aloha-agilex]
@@ -94,7 +94,7 @@ random_dance:
   # "home_debug" : drive to ``left_home``/``right_home`` and hold. Best mode
   #                for eyeballing / tuning the dance home joint values, since
   #                ik_debug overwrites the held pose with the IK solution.
-  mode: home_debug
+  mode: task
   # Named motion preset. Thin shortcut that overrides ``n_steps`` and
   # ``hold_substeps`` unless you set them explicitly below (explicit yaml
   # values always win over a preset).
