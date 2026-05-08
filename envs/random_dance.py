@@ -115,6 +115,54 @@ class random_dance(Base_Task):
         # behaviour), 15 = mild wrist wobble, 40+ = quite expressive.
         # IK success drops off quickly past ~45 deg.
         self._dance_task_pose_perturb_deg = float(task_cfg.get("pose_perturb_deg", 20.0))
+
+        # Per-joint Cartesian-bypass offset, applied AFTER IK and AFTER
+        # unwrap_toward() but BEFORE the max_joint_step / span check.
+        # Each entry [low, high] is a uniform sampling range (radians)
+        # added to the corresponding joint of the IK solution.
+        #
+        # Why this exists. IK in task mode only constrains the EE
+        # pose, so the wrist joints (j4..j6) are free to slip into
+        # whatever value minimises the IK cost. In practice that
+        # leaves j6 nearly untouched (std ~0.12 over 100 episodes;
+        # see docs/dance_home_tuning.md) and pulls j4 toward one
+        # side. This knob lets the user broaden the joint-space
+        # distribution without re-doing the whole IK pipeline.
+        #
+        # Side-effects:
+        #   * j6 is essentially gripper twist about its own axis -- it
+        #     does not move the EE, so perturbing it has zero impact
+        #     on the EE position.
+        #   * j4/j5 do shift the EE by a few cm and rotate the EE
+        #     pose by a few degrees. That is fine for the random
+        #     dance task (we are after visual coverage, not precise
+        #     placement) but obviously inappropriate for any task
+        #     that grasps an object.
+        #
+        # Default: all zeros => disabled, identical to legacy behaviour.
+        # Format in yaml: a list of 6 [lo, hi] pairs, one per joint.
+        jpp_raw = task_cfg.get("joint_post_perturb", None)
+        if jpp_raw is None:
+            self._dance_task_joint_post_perturb = None
+        else:
+            jpp = np.asarray(jpp_raw, dtype=np.float64)
+            if jpp.shape != (6, 2):
+                raise ValueError(
+                    f"random_dance.task.joint_post_perturb must be a list of "
+                    f"6 [lo, hi] pairs, got shape {jpp.shape}")
+            # Normalise so [0, 0] entries are a no-op and lo <= hi.
+            jpp = np.stack([np.minimum(jpp[:, 0], jpp[:, 1]),
+                            np.maximum(jpp[:, 0], jpp[:, 1])], axis=1)
+            if np.allclose(jpp, 0.0):
+                self._dance_task_joint_post_perturb = None
+            else:
+                self._dance_task_joint_post_perturb = jpp
+                # Friendly summary so the user can confirm at startup.
+                rngs = ", ".join(
+                    f"j{i+1}=[{jpp[i,0]:+.2f},{jpp[i,1]:+.2f}]"
+                    for i in range(6) if not (jpp[i,0] == 0.0 and jpp[i,1] == 0.0)
+                )
+                print(f"[random_dance task] joint_post_perturb active: {rngs}")
         # Upper bound on the single-joint step size between consecutive
         # IK waypoints, in radians. Curobo often returns equivalent
         # configurations differing by >1 rad on redundant joints even when
@@ -415,6 +463,23 @@ class random_dance(Base_Task):
             w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2,
         ], dtype=np.float64)
 
+    def _apply_joint_post_perturb(self, q, rng):
+        """Add per-joint uniform offsets to an IK solution ``q``.
+
+        See ``self._dance_task_joint_post_perturb`` (set in
+        ``setup_demo``) for the rationale and shape spec. Returns ``q``
+        unchanged when the knob is disabled, so the caller can wrap this
+        unconditionally.
+        """
+        jpp = getattr(self, "_dance_task_joint_post_perturb", None)
+        if jpp is None:
+            return q
+        # Sample one offset per joint per call so each IK retry sees an
+        # independent draw (otherwise we'd just keep adding the same
+        # constant offset and learn nothing about coverage).
+        offset = rng.uniform(jpp[:, 0], jpp[:, 1])
+        return q + offset
+
     def _sample_task_target(self, arm_tag, rng):
         """Uniform sample a 3D target within the arm's reachable box.
 
@@ -574,6 +639,12 @@ class random_dance(Base_Task):
                 if q is None:
                     continue
                 q = unwrap_toward(cur_left, q)
+                # Optional per-joint post-perturbation. Applied here so
+                # the span / max_joint_step check below covers the
+                # *full* movement (IK + perturbation), and unwrap_toward
+                # has already brought q close to cur_left so the offset
+                # math doesn't fight 2*pi equivalences.
+                q = self._apply_joint_post_perturb(q, rng)
                 span = float(np.max(np.abs(q - cur_left)))
                 if span < best_span_l:
                     best_q_l = q
@@ -604,6 +675,7 @@ class random_dance(Base_Task):
                 if q is None:
                     continue
                 q = unwrap_toward(cur_right, q)
+                q = self._apply_joint_post_perturb(q, rng)
                 span = float(np.max(np.abs(q - cur_right)))
                 if span < best_span_r:
                     best_q_r = q
@@ -621,35 +693,32 @@ class random_dance(Base_Task):
                   f"left={l_fail}/{n_steps}  right={r_fail}/{n_steps}  "
                   f"(these keyframes reused the previous pose)")
 
-        # ---- Per-keyframe diagnostic: max joint delta vs. previous ------
+        # ---- "Frozen keyframe" check ------------------------------------
         # If a waypoint ends up nearly identical to the previous one (even
         # though IK reported "Success"), the arm will appear *frozen* in
         # the video. This can happen when the planner clamps an
         # unreachable target to the nearest feasible qpos, which is
-        # frequently the same as the seed. Surface these cases so we can
-        # tell "frozen because IK failed and we fell back" from "frozen
-        # because IK succeeded but snapped to the seed".
+        # frequently the same as the seed. We only warn when this
+        # actually happens -- the per-keyframe delta dump was too noisy
+        # for normal collection runs.
         seed_left = np.asarray(seed_left_qpos, dtype=np.float64)
         seed_right = np.asarray(seed_right_qpos, dtype=np.float64)
-        left_deltas = [float(np.max(np.abs(left_waypoints[0] - seed_left)))]
-        right_deltas = [float(np.max(np.abs(right_waypoints[0] - seed_right)))]
-        for i in range(1, len(left_waypoints)):
-            left_deltas.append(
-                float(np.max(np.abs(left_waypoints[i] - left_waypoints[i - 1])))
-            )
-            right_deltas.append(
-                float(np.max(np.abs(right_waypoints[i] - right_waypoints[i - 1])))
-            )
         frozen_thr = 1e-3  # < 0.06 deg per joint -> effectively frozen
-        l_frozen_steps = [i for i, d in enumerate(left_deltas) if d < frozen_thr]
-        r_frozen_steps = [i for i, d in enumerate(right_deltas) if d < frozen_thr]
-        print(f"\033[96m[random_dance task]\033[0m keyframe max-joint delta (rad):")
-        print("  left :", [f"{d:.3f}" for d in left_deltas])
-        print("  right:", [f"{d:.3f}" for d in right_deltas])
+        l_prev = seed_left
+        r_prev = seed_right
+        l_frozen_steps, r_frozen_steps = [], []
+        for i, (lw, rw) in enumerate(zip(left_waypoints, right_waypoints)):
+            if float(np.max(np.abs(lw - l_prev))) < frozen_thr:
+                l_frozen_steps.append(i)
+            if float(np.max(np.abs(rw - r_prev))) < frozen_thr:
+                r_frozen_steps.append(i)
+            l_prev, r_prev = lw, rw
         if l_frozen_steps:
-            print(f"\033[93m  LEFT frozen at steps {l_frozen_steps}\033[0m")
+            print(f"\033[93m[random_dance task] LEFT frozen at steps "
+                  f"{l_frozen_steps}\033[0m")
         if r_frozen_steps:
-            print(f"\033[93m  RIGHT frozen at steps {r_frozen_steps}\033[0m")
+            print(f"\033[93m[random_dance task] RIGHT frozen at steps "
+                  f"{r_frozen_steps}\033[0m")
         return left_waypoints, right_waypoints
 
     # ------------------------------------------------------------------

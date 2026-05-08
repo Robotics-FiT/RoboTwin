@@ -1,7 +1,7 @@
 # if you want to modify the config, please check the following tutorial first:
 # https://robotwin-platform.github.io/doc/usage/configurations.html
 render_freq: 0
-episode_num: 10
+episode_num: 50
 use_seed: false
 save_freq: 15
 embodiment: [aloha-agilex]
@@ -19,11 +19,26 @@ camera:
   wrist_camera_type: D435
   collect_head_camera: true
   collect_wrist_camera: true
+  # Override the head_camera vertical FOV (degrees). The D435 profile in
+  # `_camera_config.yml` defaults to fovy=37 (fovx ~47 at 4:3), which is too
+  # narrow to fit both arms in the "default" third_person_view. Bumping to 55
+  # gives fovx ~68 at 320x240, enough to frame the full dual-arm workspace
+  # from the head_camera's (-0.032, -0.45, 1.35) mount looking down at the
+  # tabletop. Only affects head_camera; wrist cameras are unchanged.
+  head_camera_fovy: 55
+  # Override head_camera resolution (pixels). The D435 profile in
+  # `_camera_config.yml` defaults to 320x240 and is shared by other tasks
+  # plus `eval_policy*.py` / `policy/DP/train.py`, so we don't touch it
+  # globally. These keys override the head_camera's render size *only* for
+  # this task, giving 720P video without affecting wrist cameras, point
+  # cloud cropping, or other configs.
+  head_camera_w: 1280
+  head_camera_h: 720
   # Which view is used to render the final mp4 video.
   #   default  -> head_camera (first-person / wrist head)
   #   observer -> static third-person observer_camera (covers both arms)
   #   random   -> (reserved) randomised third-person camera for data augmentation
-  third_person_view: observer
+  third_person_view: default
 data_type:
   rgb: true
   third_view: false

@@ -91,6 +91,21 @@ class Camera:
         self.static_camera_config = []
         self.head_camera_type = kwags["camera"].get("head_camera_type", "D435")
         self.wrist_camera_type = kwags["camera"].get("wrist_camera_type", "D435")
+        # Optional fovy override (in degrees) for the head_camera. When set,
+        # it overrides the default fovy from `_camera_config.yml` for the
+        # selected `head_camera_type`. Useful when you want a wider field of
+        # view (e.g. to see both arms in a "default" third_person_view) without
+        # globally changing the realsense profile shared by other tasks.
+        self.head_camera_fovy_override = kwags["camera"].get("head_camera_fovy", None)
+        # Optional resolution override for the head_camera. When set, these
+        # values override the default `w` / `h` from `_camera_config.yml` for
+        # the selected `head_camera_type`. Only the head_camera is affected;
+        # wrist cameras and the global D435 profile (used by other tasks /
+        # by `eval_policy*.py` / `policy/DP/train.py`) are NOT touched.
+        # Typical use: bump head_camera to 1280x720 for nicer "default"
+        # third_person_view videos.
+        self.head_camera_w_override = kwags["camera"].get("head_camera_w", None)
+        self.head_camera_h_override = kwags["camera"].get("head_camera_h", None)
 
         self.collect_head_camera = kwags["camera"].get("collect_head_camera", True)
         self.collect_wrist_camera = kwags["camera"].get("collect_wrist_camera", True)
@@ -157,11 +172,17 @@ class Camera:
         # sensor_mount_actor = scene.create_actor_builder().build_kinematic()
 
         # camera_args = get_camera_config()
-        def create_camera(camera_info, random_head_camera_dis=0):
+        def create_camera(camera_info, random_head_camera_dis=0, fovy_override=None,
+                          w_override=None, h_override=None):
             if camera_info["type"] not in camera_args.keys():
                 raise ValueError(f"Camera type {camera_info['type']} not supported")
 
-            camera_config = camera_args[camera_info["type"]]
+            # Take a *shallow copy* so per-camera overrides (fovy / w / h) do
+            # not leak back into the global `camera_args` dict shared by other
+            # cameras (e.g. wrist) and by downstream consumers such as
+            # `eval_policy*.py` and `policy/DP/train.py` which read this same
+            # `_camera_config.yml` to size their inputs.
+            camera_config = dict(camera_args[camera_info["type"]])
             cam_pos = np.array(camera_info["position"])
             vector = np.random.randn(3)
             random_dir = vector / np.linalg.norm(vector)
@@ -177,11 +198,16 @@ class Camera:
             # sensor_config = StereoDepthSensorConfig()
             # sensor_config.rgb_resolution = (camera_config['w'], camera_config['h'])
 
+            fovy_deg = camera_config["fovy"] if fovy_override is None else float(fovy_override)
+            if w_override is not None:
+                camera_config["w"] = int(w_override)
+            if h_override is not None:
+                camera_config["h"] = int(h_override)
             camera = scene.add_camera(
                 name=camera_info["name"],
                 width=camera_config["w"],
                 height=camera_config["h"],
-                fovy=np.deg2rad(camera_config["fovy"]),
+                fovy=np.deg2rad(fovy_deg),
                 near=near,
                 far=far,
             )
@@ -254,7 +280,10 @@ class Camera:
                     camera_info["type"] = self.head_camera_type
                     # camera, sensor_camera, camera_config = create_camera(camera_info)
                     camera, camera_config = create_camera(camera_info,
-                                                          random_head_camera_dis=self.random_head_camera_dis)
+                                                          random_head_camera_dis=self.random_head_camera_dis,
+                                                          fovy_override=self.head_camera_fovy_override,
+                                                          w_override=self.head_camera_w_override,
+                                                          h_override=self.head_camera_h_override)
                     self.static_camera_list.append(camera)
                     self.static_camera_name.append(camera_info["name"])
                     # self.static_sensor_camera_list.append(sensor_camera)

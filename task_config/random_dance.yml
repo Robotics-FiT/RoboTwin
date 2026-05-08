@@ -13,7 +13,7 @@ hdri_sun_max_elevation_deg: 80.0   # 想封顶避免阴影太短
 render_freq: 0
 # Number of episodes collected per run. Lower this while debugging (e.g. 3),
 # raise it (e.g. 50) when actually producing data for training.
-episode_num: 10
+episode_num: 2
 use_seed: false
 save_freq: 15
 embodiment: [aloha-agilex]
@@ -135,6 +135,34 @@ random_dance:
     # span. speed_ref_rad=0 disables the stretch.
     speed_ref_rad:  0.8
     stretch_cap:    3.0
+    # Per-joint Cartesian-bypass offsets, applied AFTER IK + unwrap
+    # but BEFORE the max_joint_step / span check. Each entry is a
+    # [low, high] uniform sampling range in radians, ADDED to the
+    # corresponding joint of the IK solution. Useful to broaden the
+    # joint-space distribution of joints that IK alone barely
+    # excites (notably j6, which is a pure gripper twist about its
+    # own axis and so does not move EE at all).
+    #
+    # Side-effects to be aware of:
+    #   * j1..j3 perturbation: noticeably shifts EE position --
+    #     leave [0, 0] unless you specifically want EE jitter.
+    #   * j4 / j5 perturbation: shifts EE by a few cm and rotates
+    #     EE pose by a few degrees; fine for visual variety, NOT ok
+    #     for grasping tasks.
+    #   * j6 perturbation: ~zero EE shift; safe to crank up.
+    #
+    # Default below: extend j4 to reach down to ~-pi/2 (which the
+    # IK-only setup never produced because the targets sit above the
+    # table), and let j6 sweep its full range to fix its 0.12-std
+    # under-coverage. Set every entry to [0.0, 0.0] (or remove the
+    # block entirely) to disable.
+    joint_post_perturb:
+      - [0.0,    0.0]      # j1 shoulder yaw
+      - [0.0,    0.0]      # j2 shoulder pitch
+      - [0.0,    0.0]      # j3 elbow
+      - [-1.6,   0.5]      # j4 wrist pitch -- bias toward -pi/2 reach
+      - [0.0,    0.0]      # j5 wrist roll
+      - [-1.5,   1.5]      # j6 gripper twist -- full sweep
   n_steps: 30
   arm_delta: 0.6        # radians (~34 deg) around home state per joint (joint mode only)
   gripper_toggle_p: 0.2
@@ -188,5 +216,5 @@ random_dance:
   #   [ 1.10, 1.5708,+1.5708, 0.0, 0.0, 0.0]         # L-shape (wrist not yet rolled)
   #   both j5=+1.5708                                # picture-right OK, picture-left wrong
   #   left j5=-1.5708, right j5=+1.5708              # both ended up wrong (mirrored the wrong way)
-  left_home:  [ 1.10, 1.5708, 1.5708, 0.0,  1.5708, 0.0]
-  right_home: [-1.10, 1.5708, 1.5708, 0.0, -1.5708, 0.0]
+  left_home:  [ 1.10, 1.5708, 1.5708, 0,  1.5708, 0]
+  right_home: [-1.10, 1.5708, 1.5708, 0, -1.5708,  0]

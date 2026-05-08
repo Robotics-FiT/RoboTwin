@@ -98,6 +98,118 @@ keep the **same** sign on both arms.
 
 ---
 
+## Joint value ranges
+
+There are four different "ranges" to keep straight for each joint.
+
+### URDF hard limits
+
+Read from
+`assets/embodiments/aloha-agilex/urdf/arx5_description_isaac.urdf`:
+
+```
+fl_joint1..6: <limit lower="-10" upper="10" effort="100" velocity="1000" />
+fr_joint1..6: <limit lower="-10" upper="10" effort="100" velocity="1000" />
+```
+
+These are **effectively unlimited** (±10 rad ≈ ±573°). This is a RoboTwin
+convention — the real arx5 hardware has tight mechanical limits (see
+"physically plausible" column below) but the simulation URDF leaves them
+open so IK is free to explore. Do **not** treat these as a real range.
+
+### curobo retract config
+
+From `curobo_{left,right}_tmp.yml`:
+
+```
+retract_config = [0, 0, 0, 0, 0, 0, 0.04, 0.04]
+```
+
+All six arm joints retract to 0. This is what curobo's IK gravitates
+toward when multiple solutions exist (and also the reason you sometimes
+see a candidate "2π away" from the dance home — the retract pulls the
+solution toward 0 even if the seed was farther out).
+
+### Physically plausible range (real arx5 hardware)
+
+Approximate values for the arx5 mechanical limits, useful when checking
+whether an IK solution is realistically reachable:
+
+| # | Joint | Plausible range | Notes |
+|---|---|---|---|
+| j1 | shoulder yaw | ≈ [−π, +π] | Full rotation around vertical axis is common on arx5. |
+| j2 | shoulder pitch | ≈ [0, +π] | Cannot pitch below horizontal inwards (collides with base). |
+| j3 | elbow | ≈ [0, +π] | Folding beyond this starts self-colliding with the upper arm. |
+| j4 | wrist pitch | ≈ [−π/2, +π/2] | Forearm's orientation limits this. |
+| j5 | wrist roll | ≈ [−π, +π] | Continuous-rotation wrist; no hard stop on hardware. |
+| j6 | gripper twist | ≈ [−π, +π] | Continuous-rotation gripper joint. |
+
+These are **not enforced** by SAPIEN (because the URDF says ±10), so
+random / IK-returned joint values outside them will still execute; they
+will just look unphysical in the video (elbow bent backwards, etc.).
+
+### Recommended ranges for `random_dance`
+
+Empirical, derived from staring at 10 sample episodes and the safe-area
+of IK convergence. Values outside these are not forbidden, just likely
+to produce visually weird frames or low IK yield.
+
+| # | Joint | Dance home | Recommended variation around home | Comment |
+|---|---|---|---|---|
+| j1 | shoulder yaw | `±1.10` | ±1.2 rad | URDF gives full rotation but past ±1.4 the hand starts swinging into the robot's own body. |
+| j2 | shoulder pitch | `+π/2` | ±1.0 rad around π/2 | Keep above ~0.3 to avoid "arm swinging down past the base". |
+| j3 | elbow | `+π/2` | [0, π] | Going beyond π puts the elbow "inside out"; curobo occasionally returns such solutions (see `max_joint_step`). |
+| j4 | wrist pitch | `0` | ±1.2 rad | Far outside hits self-collision with forearm. |
+| j5 | wrist roll | `±π/2` | ±π around home | Continuous joint; large values are fine. |
+| j6 | gripper twist | `0` | ±π/2 | Currently under-excited (0.12 std) because IK alone doesn't drive it. Increase `task.pose_perturb_deg` to wake it up. |
+
+### Observed ranges in collected data
+
+From `data/random_dance/random_dance/` (10 episodes, 4049 timesteps):
+
+| # | Left range | Right range | Left std | Right std | Comment |
+|---|---|---|---|---|---|
+| j1 | 2.32 | 2.44 | 0.47 | 0.47 | Well covered, symmetric. |
+| j2 | 4.14 | 3.01 | 0.63 | 0.51 | Left has a 2π-equivalent outlier episode. |
+| j3 | **5.03** | 2.74 | 0.92 | 0.52 | Same outlier episode (curobo picked an "elbow flipped" solution). |
+| j4 | 3.29 | 2.36 | 0.59 | 0.46 | Well covered. |
+| j5 | 2.80 | 2.89 | 0.54 | 0.55 | Well covered, symmetric. |
+| j6 | **0.98** | **0.91** | **0.12** | **0.12** | **Under-covered** — IK barely touches this joint; bump `pose_perturb_deg` to fix. |
+
+To reproduce these stats:
+
+```bash
+conda activate RoboTwin
+python -c "
+import h5py, numpy as np, glob
+files = sorted(glob.glob('data/random_dance/random_dance/data/episode*.hdf5'))
+all_l, all_r = [], []
+for f in files:
+    with h5py.File(f) as h:
+        all_l.append(h['joint_action']['left_arm'][:])
+        all_r.append(h['joint_action']['right_arm'][:])
+L, R = np.concatenate(all_l), np.concatenate(all_r)
+for j in range(6):
+    c = L[:,j]
+    print(f'L j{j+1}: min={c.min():+.3f} max={c.max():+.3f} std={c.std():.3f} range={c.max()-c.min():.3f}')
+"
+```
+
+### Mirroring rules (summary)
+
+When setting `left_home` / `right_home` for a symmetric-looking pose:
+
+| Joint | Mirror sign? |
+|---|---|
+| j1 | **Yes** (shoulder yaw flips left↔right) |
+| j2 | No (both arms pitch the same direction in world frame) |
+| j3 | No |
+| j4 | No |
+| j5 | **Yes** (URDF is not pre-mirrored, so same numeric value rotates both grippers the same direction in world space — one side will look wrong) |
+| j6 | No |
+
+---
+
 ## The `home_debug` mode
 
 `mode: home_debug` (in `task_config/random_dance.yml`, under

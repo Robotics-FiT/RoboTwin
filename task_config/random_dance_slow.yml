@@ -135,6 +135,16 @@ random_dance:
     # span. speed_ref_rad=0 disables the stretch.
     speed_ref_rad:  0.8
     stretch_cap:    3.0
+    # Joint-space post-perturbation; see random_dance.yml for the full
+    # explanation. Keep this in sync with random_dance.yml so the slow
+    # preset has the same joint coverage characteristics.
+    joint_post_perturb:
+      - [0.0,    0.0]      # j1
+      - [0.0,    0.0]      # j2
+      - [0.0,    0.0]      # j3
+      - [-1.6,   0.5]      # j4
+      - [0.0,    0.0]      # j5
+      - [-1.5,   1.5]      # j6
   n_steps: 30
   arm_delta: 0.6        # radians (~34 deg) around home state per joint (joint mode only)
   gripper_toggle_p: 0.2

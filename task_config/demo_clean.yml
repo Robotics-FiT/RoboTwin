@@ -19,6 +19,15 @@ camera:
   wrist_camera_type: D435
   collect_head_camera: true
   collect_wrist_camera: true
+  # Override the head_camera vertical FOV (degrees). The D435 profile in
+  # `_camera_config.yml` defaults to fovy=37 (fovx ~47 at 4:3), which is too
+  # narrow to fit both arms in the "default" third_person_view. Bumping to 55
+  # gives fovx ~68 at 320x240, enough to frame the full dual-arm workspace
+  # from the head_camera's (-0.032, -0.45, 1.35) mount looking down at the
+  # tabletop. Only affects head_camera; wrist cameras are unchanged.
+  head_camera_fovy: 55
+  head_camera_w: 1280
+  head_camera_h: 720
   # Which view is used to render the final mp4 video.
   #   default  -> head_camera (first-person / wrist head)
   #   observer -> static third-person observer_camera (covers both arms)
