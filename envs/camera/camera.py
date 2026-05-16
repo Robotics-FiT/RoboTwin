@@ -145,6 +145,18 @@ class Camera:
         self.random_view_look_at = np.array(_rv.get("look_at", [0.0, 0.0, 0.74]), dtype=np.float64)
         self.random_view_look_at_jitter = float(_rv.get("look_at_jitter", 0.05))
 
+        # Parameters for the fixed "observer" third-person view. Defaults are
+        # tuned for a telephoto-style framing (narrow fovy + camera pulled
+        # back) which keeps both arms in frame while strongly suppressing the
+        # wide-angle perspective distortion of the original 70-deg / 0.65 m
+        # setup. All three knobs are optional under camera.observer.* in the
+        # task yaml and override the defaults below.
+        _obs = kwags["camera"].get("observer", {}) or {}
+        self.observer_fovy_deg = float(_obs.get("fovy_deg", 26.0))
+        self.observer_distance = float(_obs.get("distance", 1.80))   # metres along -y axis from look-at
+        self.observer_height = float(_obs.get("height", 1.30))       # camera world z
+        self.observer_look_at_z = float(_obs.get("look_at_z", 0.95)) # world z of the point camera looks at
+
         # embodiment = kwags.get('embodiment')
         # embodiment_config_path = os.path.join(CONFIGS_PATH, '_embodiment_config.yml')
         # with open(embodiment_config_path, 'r', encoding='utf-8') as f:
@@ -354,16 +366,24 @@ class Camera:
             )
         else:
             # "observer": fixed third-person view facing the robot *across*
-            # the table, so the table sits between the camera and the robot.
-            # Robot base is around y=-0.65, table centre at y=0, table depth
-            # ~0.7m (front edge at y=+0.35). We stand just past the front
-            # edge, around head height, with a gentle downward tilt so the
-            # tabletop + any objects + the robot's upper body all sit in
-            # frame while the camera is mostly horizontal (not a heavy
-            # top-down pitch).
-            observer_w, observer_h, observer_fovy_deg = 1280, 720, 70
-            observer_cam_pos = np.array([0.0, 0.65, 1.20])
-            observer_cam_forward = np.array([0.0, -1.0, -0.4])
+            # the table. Defaults below are a telephoto-style framing
+            # (narrow fovy + camera pulled back to ~1.9 m): keeps both
+            # arms in frame while strongly suppressing the wide-angle
+            # perspective distortion that the original 70-deg / 0.65 m
+            # setup produced (forearms looked stretched, the gripper
+            # nearest the camera looked oversized). All four knobs are
+            # overridable from the task yaml under ``camera.observer.*``
+            # (fovy_deg / distance / height / look_at_z).
+            observer_w, observer_h = 1280, 720
+            observer_fovy_deg = self.observer_fovy_deg
+            # Camera sits on the +y side of the table (across from the robot
+            # base which is on -y), at the configured height, and aims at a
+            # point directly above the tabletop centre at look_at_z. Forward
+            # is therefore (0, -distance, look_at_z - height).
+            observer_cam_pos = np.array([0.0, self.observer_distance, self.observer_height])
+            observer_cam_forward = np.array(
+                [0.0, -self.observer_distance, self.observer_look_at_z - self.observer_height]
+            )
             # Camera-local +Y ("left"). Keep it as world +x so up = fwd x left
             # ends up with +z component (image stays right-side up). With this
             # convention, screen-left = world +x, i.e. the robot's left arm

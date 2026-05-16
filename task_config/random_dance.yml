@@ -57,6 +57,20 @@ camera:
   # random pose on a partial sphere around the tabletop (good for visual
   # augmentation).
   third_person_view: observer
+  # Knobs for the fixed "observer" third-person view (third_person_view == observer).
+  # Defaults: telephoto-style framing -- narrow fovy (28 deg) + camera pulled back
+  # to ~1.55 m on the +y side of the table, aimed at a point ~0.95 m above the
+  # tabletop centre. This trades a tighter angle of view for much less wide-angle
+  # perspective distortion than the previous 70-deg / 0.65 m setup, which was
+  # making the forearms look stretched and the near gripper oversized.
+  # Uncomment + tweak to reframe (e.g. wider fovy + closer camera = more
+  # "in your face" demo angle; even narrower fovy + further back = closer to
+  # an orthographic look).
+  # observer:
+  #   fovy_deg:    28.0       # vertical field of view in degrees
+  #   distance:    1.55       # metres along +y from the look-at point
+  #   height:      1.30       # camera world z
+  #   look_at_z:   0.95       # world z the camera aims at (tabletop ~0.74)
   # Knobs for the random third-person view (only used when third_person_view == random).
   random_view:
     azimuth_range: [-90.0, 90.0]      # deg; 0 = robot front, +/-90 = robot side
@@ -115,7 +129,7 @@ random_dance:
   # "home_debug" : drive to ``left_home``/``right_home`` and hold. Best mode
   #                for eyeballing / tuning the dance home joint values, since
   #                ik_debug overwrites the held pose with the IK solution.
-  mode: task
+  mode: ik_debug
   # Named motion preset. Thin shortcut that overrides ``n_steps`` and
   # ``hold_substeps`` unless you set them explicitly below (explicit yaml
   # values always win over a preset).
@@ -128,6 +142,13 @@ random_dance:
   # ik_debug-only knobs
   ik_debug_hover: 0.20    # metres above the table top
   ik_debug_forward: 0.20  # metres toward observer camera (+y direction)
+  # Lateral spread along world x: left arm targets x=-lateral, right arm
+  # x=+lateral (relative to table_xy_bias). Increase to spread the two arms
+  # further apart along the camera's horizontal axis without changing height
+  # (z) or distance to camera (y). 0.30 = tight (legacy default, grippers
+  # close to midline); 0.45 = comfortably open; >0.55 risks IK failure /
+  # leaving the tabletop (table is 1.2 m wide in x).
+  ik_debug_lateral: 0.4
   # home_debug-only knob. Float in [0, 1]: 0 = gripper closed, 1 = open.
   # Set to null (or remove) to leave the grippers at whatever they are
   # (usually 0 at episode start).
@@ -237,5 +258,8 @@ random_dance:
   #   [ 1.10, 1.5708,+1.5708, 0.0, 0.0, 0.0]         # L-shape (wrist not yet rolled)
   #   both j5=+1.5708                                # picture-right OK, picture-left wrong
   #   left j5=-1.5708, right j5=+1.5708              # both ended up wrong (mirrored the wrong way)
-  left_home:  [ 1.10, 1.5708, 1.5708, 0,  1.5708, 0]
-  right_home: [-1.10, 1.5708, 1.5708, 0, -1.5708,  0]
+  # left_home:  [ 1.10, 1.5708, 1.5708, 0,  1.5708, 0]
+  # right_home: [-1.10, 1.5708, 1.5708, 0, -1.5708,  0]  
+  left_home:  [+0.1376, +2.8357, +2.6479, +0.1871, +0.1687, +0.0048]
+  right_home: [-0.1832, +2.8042, +2.5886, +0.2165, -0.1522, +0.0053]
+

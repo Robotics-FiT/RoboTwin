@@ -86,6 +86,13 @@ class random_dance(Base_Task):
         # target leaves the tabletop (table width is 0.7 -> front edge at
         # y=+0.35).
         self._dance_ik_debug_forward = float(dance_cfg.get("ik_debug_forward", 0.20))
+        # Lateral spread (metres) along world x for ik_debug targets. The left
+        # arm aims at x = -lateral, the right arm at x = +lateral (both relative
+        # to ``self.table_xy_bias``). Increase to spread the arms further apart
+        # (good for showing both arms cleanly in the observer view); decrease
+        # to bring the grippers closer to the midline. Table is 1.2 m wide in
+        # x, so anything beyond ~0.55 risks IK failure / off-table targets.
+        self._dance_ik_debug_lateral = float(dance_cfg.get("ik_debug_lateral", 0.30))
 
         # home_debug-only knob: force grippers to this normalised value
         # (0 = close, 1 = open) while holding the dance home pose. None
@@ -788,9 +795,10 @@ class random_dance(Base_Task):
         table_top_z = 0.74 + self.table_z_bias  # matches create_table_and_wall
         hover_z = table_top_z + self._dance_ik_debug_hover
         fwd_y = self._dance_ik_debug_forward
+        lat_x = self._dance_ik_debug_lateral
 
-        left_target = np.array([table_x_bias - 0.3, table_y_bias + fwd_y, hover_z])
-        right_target = np.array([table_x_bias + 0.3, table_y_bias + fwd_y, hover_z])
+        left_target = np.array([table_x_bias - lat_x, table_y_bias + fwd_y, hover_z])
+        right_target = np.array([table_x_bias + lat_x, table_y_bias + fwd_y, hover_z])
 
         print("\033[96m[ik-debug]\033[0m table_top_z = "
               f"{table_top_z:.3f}  hover_z = {hover_z:.3f}  forward_y = {fwd_y:.3f}")
@@ -848,6 +856,14 @@ class random_dance(Base_Task):
         print(f"  right j1,j2,j3     : {float(r_q[0]):+.3f}, {float(r_q[1]):+.3f}, {float(r_q[2]):+.3f}")
         print(f"  right EE reached   : [{right_ee_after[0]:+.3f}, {right_ee_after[1]:+.3f}, {right_ee_after[2]:+.3f}]")
         print(f"  right EE error     : {r_err*1000:.1f} mm")
+        # Copy-paste-ready dance home block: drop the two lines below
+        # straight into ``random_dance.left_home`` / ``right_home`` in
+        # the task yaml to freeze this IK pose as the dance start pose.
+        l_home_str = "[" + ", ".join(f"{float(v):+.4f}" for v in l_q) + "]"
+        r_home_str = "[" + ", ".join(f"{float(v):+.4f}" for v in r_q) + "]"
+        print("\033[92m[ik-debug] yaml-ready dance home\033[0m")
+        print(f"  left_home:  {l_home_str}")
+        print(f"  right_home: {r_home_str}")
         print("\033[92m[ik-debug] end\033[0m ----------------------------")
 
     def _settle_to_dance_home(self, left_home, right_home,

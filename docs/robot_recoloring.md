@@ -76,6 +76,70 @@ Rule ordering matters because the matcher is first-match-wins.
 
 ---
 
+## Per-link geometry (axis-aligned, in the link's own frame)
+
+Sizes below are the **axis-aligned bounding box** of each link's *visual*
+mesh, after applying the URDF `<origin rpy=...>` of the visual but
+**before** any joint transform — i.e. they describe the shape of the part
+itself, not where it ends up in the world. All values are in mm and were
+read directly from
+`assets/embodiments/aloha-agilex/urdf/arx5_description_isaac.urdf`
+(visual `<mesh>` files under `aloha_maniskill_sim/meshes/`) by computing
+`vertices.max(0) - vertices.min(0)` after the visual rpy.
+
+The aloha-agilex URDF defines four arm chains:
+`fl_*` (front-left, our visible left arm),
+`fr_*` (front-right),
+`lr_*` and `rr_*` (a second pair, lower-rear in the URDF; uses the
+"back" finger mesh `back_link7.dae` instead of `link7.dae`).
+`fl_*` / `fr_*` / `lr_*` / `rr_*` share the same per-segment meshes
+except for `link7` vs `back_link7`, so only `fl_*` is listed.
+
+### Mobile base & torso
+
+| Link                     | X (mm) | Y (mm) | Z (mm) | Mesh                          | Notes |
+|--------------------------|-------:|-------:|-------:|-------------------------------|-------|
+| `base_link`              | 685    | 570    | 161    | `tracer_base_link.dae`        | mobile chassis (visual rpy = 1.57,0,0; values shown after rotation) |
+| `right_wheel_link`       | 121    | 84     | 121    | `tracer_wheel.dae`            | drive wheel (∅ ≈ 121 mm, width 84 mm) |
+| `left_wheel_link`        | 121    | 84     | 121    | `tracer_wheel.dae`            | drive wheel |
+| `fl_castor_link` etc. ×4 | 97     | 85     | 84     | `castor_joint.dae`            | castor swivel housing |
+| `fl_wheel_link` etc. ×4  | 75     | 75     | 53     | `castor.dae`                  | castor wheel itself |
+| `box1_Link`              | 578    | 476    | 53     | `box1_Link.STL`               | thin lower torso plate |
+| `box2_Link`              | 679    | 700    | 787    | `box2_Link.dae`               | upper-torso shell (mesh is one big shaped part, not a small box) |
+
+### Head camera tower
+
+| Link               | X (mm) | Y (mm) | Z (mm) | Mesh                       | Notes |
+|--------------------|-------:|-------:|-------:|----------------------------|-------|
+| `camera_base_link` | 94     | 70     | 647    | `camera_base_link.STL`     | the tall vertical pole (this is what dominates the silhouette) |
+| `camera_link1`     | 78     | 102    | 36     | `camera_link1.dae`         | horizontal arm |
+| `camera_link2`     | 78     | 102    | 36     | `camera_link2.dae`         | head holding the front cam |
+| `left_camera`      | 25     | 90     | 25     | `d435.dae`                 | RealSense D435 stub on `fl_link6` (also `right_camera` on fr) |
+
+### Single arm (`fl_*`; `fr_*` / `lr_*` / `rr_*` identical except `link7`)
+
+| Link              | X (mm) | Y (mm) | Z (mm) | Mesh             | Region              |
+|-------------------|-------:|-------:|-------:|------------------|---------------------|
+| `fl_base_link`    | 60     | 60     | 63     | `base_arm.dae`   | shoulder mount cube |
+| `fl_link1`        | 61     | 64     | 61     | `link1.dae`      | shoulder yaw nubbin |
+| `fl_link2`        | **325**| 74     | 60     | `link2.dae`      | upper arm (long axis = X) |
+| `fl_link3`        | **303**| 85     | 118    | `link3.dae`      | forearm-front (long axis = X) |
+| `fl_link4`        | 116    | 62     | 104    | `link4.dae`      | forearm short segment |
+| `fl_link5`        | 71     | 61     | 79     | `link5.dae`      | wrist 1             |
+| `fl_link6`        | 77     | **174**| 89     | `link6.dae`      | wrist 2 (long axis = Y; this is what the recolor scheme calls the "wrist 2" yellow band) |
+| `fl_link7`        | 86     | 37     | 61     | `link7.dae`      | gripper finger      |
+| `fl_link8`        | 86     | 37     | 61     | `link8.dae`      | gripper finger (mirror) |
+| `lr_link7` / `rr_link7` | 121 | 173 | 228 | `back_link7.dae` | rear-arm "finger"; longer/heavier than `link7.dae` |
+
+Quick sanity check from these numbers: shoulder→EE for one arm is about
+`link2.X + link3.X + link4.X ≈ 0.325 + 0.303 + 0.116 ≈ 0.74 m` of
+serial reach. That's why the `ik_debug` lateral spread (`±0.45 m` from
+the table-bias midline) is well inside the reachable envelope: each
+shoulder is at `x ≈ ±0.30 m`, so the wrist only needs to travel
+`~0.15 m` sideways to reach the target.
+
+---
+
 ## Two bugs we hit (and the fixes)
 
 Both bugs caused the **same** visible symptom — the video looks like
