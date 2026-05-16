@@ -34,6 +34,18 @@ camera:
   # cloud cropping, or other configs.
   head_camera_w: 1280
   head_camera_h: 720
+  # Override head_camera pose (position / forward / left in world coords).
+  # The aloha-agilex embodiment defaults to forward=(0, 0.6, -0.8) which is
+  # only ~53deg below horizontal -- that frames the tabletop nicely but
+  # *cuts off* the rest pose, where both EEs end up almost directly under
+  # the camera mount. Tilting forward to (0, 0.3, -0.9) gives ~71.6deg pitch
+  # down: the lower edge of frame now reaches ~99deg (i.e. slightly behind
+  # vertical), so the home/rest pose sits comfortably in frame. Position
+  # and left are kept at embodiment defaults (commented out below); set
+  # them only if you also want to relocate the mount.
+  # head_camera_position: [-0.032, -0.45, 1.35]
+  head_camera_forward: [0, 0.3, -0.9]
+  # head_camera_left: [-1, 0, 0]
   # Which view is used to render the final mp4 video.
   #   default  -> head_camera (first-person / wrist head)
   #   observer -> static third-person observer_camera (covers both arms)

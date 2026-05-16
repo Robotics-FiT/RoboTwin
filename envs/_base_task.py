@@ -715,6 +715,30 @@ class Base_Task(gym.Env):
             link: sapien.physx.PhysxArticulationLinkComponent = link
             link.set_mass(1)
 
+        # Optional per-link recoloring for visual debugging / disambiguation.
+        # Triggered by ``recolor_robot: true`` in the task yaml. Optional
+        # ``recolor_scheme`` overrides the default rules (see
+        # envs/utils/robot_coloring.py for the rule format).
+        recolor_cfg = kwags.get("recolor_robot", False)
+        if recolor_cfg:
+            from .utils.robot_coloring import recolor_robot, DEFAULT_SCHEME
+            scheme = kwags.get("recolor_scheme", None) or DEFAULT_SCHEME
+            default_color = kwags.get("recolor_default_color", None)
+            verbose = bool(kwags.get("recolor_verbose", False))
+            # Default to True: without clearing the baked diffuse texture
+            # the PBR shader computes ``albedo = base_color * texture``,
+            # which leaves dark-textured arm links looking nearly black
+            # even after we write a bright base_color. Set
+            # ``recolor_clear_texture: false`` in the yaml to keep textures.
+            clear_texture = bool(kwags.get("recolor_clear_texture", True))
+            recolor_robot(self.robot.left_entity, scheme=scheme,
+                          default_color=default_color,
+                          clear_texture=clear_texture, verbose=verbose)
+            if self.robot.right_entity is not self.robot.left_entity:
+                recolor_robot(self.robot.right_entity, scheme=scheme,
+                              default_color=default_color,
+                              clear_texture=clear_texture, verbose=verbose)
+
     def load_camera(self, hdri_path=None, **kwags):
         """
         Add cameras and set camera parameters

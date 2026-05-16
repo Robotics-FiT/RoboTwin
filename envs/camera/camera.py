@@ -106,6 +106,19 @@ class Camera:
         # third_person_view videos.
         self.head_camera_w_override = kwags["camera"].get("head_camera_w", None)
         self.head_camera_h_override = kwags["camera"].get("head_camera_h", None)
+        # Optional pose overrides for the head_camera. When provided, these
+        # replace the corresponding fields from the embodiment's
+        # `static_camera_list` entry (see e.g.
+        # `assets/embodiments/aloha-agilex/config.yml`). Use this when you
+        # want to retarget the head_camera for a specific task -- e.g. tilt
+        # it further down so the rest pose is in frame -- without touching
+        # the embodiment defaults shared by all other tasks.
+        # Each must be a 3-element list/tuple in world coordinates.
+        # `forward` does not need to be unit-length; it is normalised in
+        # `create_camera`.
+        self.head_camera_position_override = kwags["camera"].get("head_camera_position", None)
+        self.head_camera_forward_override = kwags["camera"].get("head_camera_forward", None)
+        self.head_camera_left_override = kwags["camera"].get("head_camera_left", None)
 
         self.collect_head_camera = kwags["camera"].get("collect_head_camera", True)
         self.collect_wrist_camera = kwags["camera"].get("collect_wrist_camera", True)
@@ -278,8 +291,20 @@ class Camera:
                 if self.collect_head_camera:
                     self.head_camera_id = i
                     camera_info["type"] = self.head_camera_type
+                    # Apply optional task-config pose overrides (position /
+                    # forward / left). We copy first so the embodiment's
+                    # `static_camera_list` dict (held in memory across
+                    # episodes) stays intact -- only this episode's spawn
+                    # uses the overridden pose.
+                    head_info = dict(camera_info)
+                    if self.head_camera_position_override is not None:
+                        head_info["position"] = list(self.head_camera_position_override)
+                    if self.head_camera_forward_override is not None:
+                        head_info["forward"] = list(self.head_camera_forward_override)
+                    if self.head_camera_left_override is not None:
+                        head_info["left"] = list(self.head_camera_left_override)
                     # camera, sensor_camera, camera_config = create_camera(camera_info)
-                    camera, camera_config = create_camera(camera_info,
+                    camera, camera_config = create_camera(head_info,
                                                           random_head_camera_dis=self.random_head_camera_dis,
                                                           fovy_override=self.head_camera_fovy_override,
                                                           w_override=self.head_camera_w_override,

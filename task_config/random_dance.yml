@@ -13,7 +13,7 @@ hdri_sun_max_elevation_deg: 80.0   # 想封顶避免阴影太短
 render_freq: 0
 # Number of episodes collected per run. Lower this while debugging (e.g. 3),
 # raise it (e.g. 50) when actually producing data for training.
-episode_num: 2
+episode_num: 1
 use_seed: false
 save_freq: 15
 embodiment: [aloha-agilex]
@@ -80,6 +80,27 @@ save_path: ./data
 clear_cache_freq: 5
 collect_data: true
 eval_video_log: true
+# Repaint each robot link with a distinct flat color for visual disambiguation
+# (gripper green, forearm red, wrist orange/yellow, upper-arm blue/purple/cyan,
+# shoulder mount magenta, etc.). Implementation: envs/utils/robot_coloring.py.
+# Set to false to keep the original URDF textures.
+recolor_robot: true
+# recolor_verbose: true   # uncomment to print per-link color choices once
+# Optional override; if omitted, ``DEFAULT_SCHEME`` from robot_coloring.py
+# is used. Each rule's ``match`` is a case-insensitive substring of the
+# link name; the first match wins. Colors are RGB in [0, 1].
+# recolor_scheme:
+#   - {match: link7,        color: [0.10, 0.85, 0.20]}   # gripper
+#   - {match: link8,        color: [0.10, 0.85, 0.20]}
+#   - {match: link4,        color: [0.95, 0.15, 0.15]}   # forearm
+#   - {match: link1,        color: [0.20, 0.45, 0.95]}   # shoulder
+# recolor_default_color: [0.7, 0.7, 0.7]   # color for links not matched above
+# recolor_clear_texture: false   # leave OFF unless you accept the risk of
+#                                # SAPIEN's "Triangle shape contains multiple
+#                                # parts with different materials" error on
+#                                # multi-part meshes. base_color modulates the
+#                                # texture, so colors are usually visible
+#                                # without clearing.
 # Random-dance specific knobs (consumed by envs/random_dance.py).
 # Larger `arm_delta` -> bigger dance amplitude; `hold_substeps` must also grow,
 # otherwise each keyframe segment gets traversed too fast for the PD
@@ -161,7 +182,7 @@ random_dance:
       - [0.0,    0.0]      # j2 shoulder pitch
       - [0.0,    0.0]      # j3 elbow
       - [-1.6,   0.5]      # j4 wrist pitch -- bias toward -pi/2 reach
-      - [0.0,    0.0]      # j5 wrist roll
+      - [-1.5,   1.5]      # j5 wrist roll
       - [-1.5,   1.5]      # j6 gripper twist -- full sweep
   n_steps: 30
   arm_delta: 0.6        # radians (~34 deg) around home state per joint (joint mode only)

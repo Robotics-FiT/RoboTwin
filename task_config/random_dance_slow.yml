@@ -1,17 +1,22 @@
 # =============================================================================
 # random_dance_slow.yml
-# Sister config of random_dance.yml for running a second, concurrent
-# continuousCollect.sh with the ``slow`` motion preset. Only ``preset``
-# differs from random_dance.yml -- keep everything else in sync when you
-# tweak the main file (or just ``cp random_dance.yml random_dance_slow.yml``
-# and re-apply the ``preset: slow`` line below).
+# Sister config of random_dance.yml. Identical in every way except for
+# ``preset: slow`` below -- which makes the dance use 10 keyframes held
+# 160 substeps each, vs. the default 30 / 80. Output goes to
+# data/random_dance/random_dance_slow/ so it doesn't collide with the
+# default-preset run.
 #
-# Data goes to data/random_dance/random_dance_slow/ so it doesn't collide
-# with the default-preset run.
+# To re-sync after editing random_dance.yml:
+#   cp task_config/random_dance.yml task_config/random_dance_slow.yml
+#   # then re-apply: preset: slow  (and this banner)
 # =============================================================================
 # --- HDRI environment lighting (opt-in; off by default for legacy tasks) ---
-# Same opt-in block as random_dance.yml. Keep these two yamls in sync when
-# you tweak HDRI-related knobs.
+# Master switch. When true, _init_task_env_ picks one .exr per episode from
+# ``environment_map_pool`` (default: assets/scenes/HDRIs/*.exr), the scene
+# uses it as skybox + IBL, and a directional "sun" light is auto-extracted
+# from the brightest blob in the HDRI for crisp tabletop shadows.
+# Set to false (or remove this whole block + the hdri_sun_* knobs below)
+# to fall back to SAPIEN's default solid skybox + legacy directional fill.
 use_environment_map: true
 # environment_map_pool: assets/scenes/HDRIs/*.exr   # uncomment to override
 hdri_sun_intensity: 10.0           # 想更亮的 key light
@@ -20,7 +25,7 @@ hdri_sun_max_elevation_deg: 80.0   # 想封顶避免阴影太短
 render_freq: 0
 # Number of episodes collected per run. Lower this while debugging (e.g. 3),
 # raise it (e.g. 50) when actually producing data for training.
-episode_num: 300
+episode_num: 6060
 use_seed: false
 save_freq: 15
 embodiment: [aloha-agilex]
@@ -94,10 +99,13 @@ eval_video_log: true
 # consecutive segments are stitched seamlessly -- no settle phase, no
 # start-stop-start-stop stutter.
 random_dance:
-  # "joint"    : legacy random joint-space dance.
-  # "task"     : random Cartesian targets per arm (see ``task`` block below);
-  #              each arm stays inside its own half of the table.
-  # "ik_debug" : drive once to a fixed Cartesian target and log IK output.
+  # "joint"      : legacy random joint-space dance.
+  # "task"       : random Cartesian targets per arm (see ``task`` block below);
+  #                each arm stays inside its own half of the table.
+  # "ik_debug"   : drive once to a fixed Cartesian target and log IK output.
+  # "home_debug" : drive to ``left_home``/``right_home`` and hold. Best mode
+  #                for eyeballing / tuning the dance home joint values, since
+  #                ik_debug overwrites the held pose with the IK solution.
   mode: task
   # Named motion preset. Thin shortcut that overrides ``n_steps`` and
   # ``hold_substeps`` unless you set them explicitly below (explicit yaml
@@ -111,6 +119,10 @@ random_dance:
   # ik_debug-only knobs
   ik_debug_hover: 0.20    # metres above the table top
   ik_debug_forward: 0.20  # metres toward observer camera (+y direction)
+  # home_debug-only knob. Float in [0, 1]: 0 = gripper closed, 1 = open.
+  # Set to null (or remove) to leave the grippers at whatever they are
+  # (usually 0 at episode start).
+  home_debug_gripper: 1.0
   # task-mode sampling box. All values are world-frame metres (before adding
   # the small random ``table_xy_bias`` / ``table_z_bias`` jitters). The z
   # range is *relative to the table top* so it tracks ``random_table_height``.
@@ -135,31 +147,86 @@ random_dance:
     # span. speed_ref_rad=0 disables the stretch.
     speed_ref_rad:  0.8
     stretch_cap:    3.0
-    # Joint-space post-perturbation; see random_dance.yml for the full
-    # explanation. Keep this in sync with random_dance.yml so the slow
-    # preset has the same joint coverage characteristics.
+    # Per-joint Cartesian-bypass offsets, applied AFTER IK + unwrap
+    # but BEFORE the max_joint_step / span check. Each entry is a
+    # [low, high] uniform sampling range in radians, ADDED to the
+    # corresponding joint of the IK solution. Useful to broaden the
+    # joint-space distribution of joints that IK alone barely
+    # excites (notably j6, which is a pure gripper twist about its
+    # own axis and so does not move EE at all).
+    #
+    # Side-effects to be aware of:
+    #   * j1..j3 perturbation: noticeably shifts EE position --
+    #     leave [0, 0] unless you specifically want EE jitter.
+    #   * j4 / j5 perturbation: shifts EE by a few cm and rotates
+    #     EE pose by a few degrees; fine for visual variety, NOT ok
+    #     for grasping tasks.
+    #   * j6 perturbation: ~zero EE shift; safe to crank up.
+    #
+    # Default below: extend j4 to reach down to ~-pi/2 (which the
+    # IK-only setup never produced because the targets sit above the
+    # table), and let j6 sweep its full range to fix its 0.12-std
+    # under-coverage. Set every entry to [0.0, 0.0] (or remove the
+    # block entirely) to disable.
     joint_post_perturb:
-      - [0.0,    0.0]      # j1
-      - [0.0,    0.0]      # j2
-      - [0.0,    0.0]      # j3
-      - [-1.6,   0.5]      # j4
-      - [0.0,    0.0]      # j5
-      - [-1.5,   1.5]      # j6
+      - [0.0,    0.0]      # j1 shoulder yaw
+      - [0.0,    0.0]      # j2 shoulder pitch
+      - [0.0,    0.0]      # j3 elbow
+      - [-1.6,   0.5]      # j4 wrist pitch -- bias toward -pi/2 reach
+      - [-1.5,   1.5]      # j5 wrist roll
+      - [-1.5,   1.5]      # j6 gripper twist -- full sweep
   n_steps: 30
   arm_delta: 0.6        # radians (~34 deg) around home state per joint (joint mode only)
   gripper_toggle_p: 0.2
   hold_substeps: 80     # physics substeps per keyframe segment
   save_every: 8         # save one observation every N substeps
   # Centre of the random joint sampling (task-level "dance home", independent of
-  # the embodiment's homestate). Same L-shape pose as random_dance.yml --
-  # upper arm vertical, forearm horizontal + 90 deg wrt upper arm, grippers
-  # open and mirrored. See docs/dance_home_tuning.md for the full design
-  # rationale and tuning history.
-  # Joint order: [j1 shoulder-yaw, j2 shoulder-pitch, j3 elbow, j4,
-  # j5 wrist-roll, j6]. Note: j1 and j5 are mirrored per arm; j2/j3/j4/j6
-  # keep the same sign.
-  # Previous attempts kept here for reference:
-  #   [ 0.30, 0.40, 0.80, 0.0, 0.80, 0.0]   # folded forward (original)
-  #   [ 1.10, 0.10, 0.10, 0.0, 0.10, 0.0]   # spread open, flat
-  left_home:  [ 1.10, 1.5708, 1.5708, 0.0,  1.5708, 0.0]
-  right_home: [-1.10, 1.5708, 1.5708, 0.0, -1.5708, 0.0]
+  # the embodiment's homestate). Tweak so both arms spread open and face the
+  # observer camera. Joint order: [j1 shoulder-yaw, j2 shoulder-pitch,
+  # j3 elbow, j4, j5 wrist-pitch, j6]. Comment out to fall back to the
+  # built-in defaults in envs/random_dance.py.
+  #
+  # Design goal: "L"-shaped arm.
+  #   - upper arm (shoulder -> elbow) : vertical, pointing up
+  #   - forearm   (elbow    -> wrist) : horizontal, in the world xz plane
+  #                                     (perpendicular to +y, i.e. to the
+  #                                     robot -> camera line)
+  #   - wrist: free (no constraint)
+  #
+  # Derivation (left arm; right = mirror of j1):
+  #   j1 (shoulder yaw)   = +1.10 rad (~63 deg) -> arm rotated outward so
+  #                         it reaches toward world -x side
+  #   j2 (shoulder pitch) = -pi/2 (-1.5708)     -> upper arm swung from the
+  #                         zero-pose horizontal to vertical up
+  #   j3 (elbow)          = -pi/2 (-1.5708)     -> forearm folded 90 deg
+  #                         relative to the upper arm
+  #   j4..j6              = 0
+  #
+  # Sanity-check numbers to look for in the ik_debug log
+  # (shoulder is at world z ~= 0.78, upper arm ~0.25m, forearm ~0.26m):
+  #   EE.z should be close to 0.78 + 0.25 = ~1.03  (upper arm vertical)
+  #   horizontal distance (EE.xy - shoulder.xy) should be ~0.26 (forearm horiz.)
+  # If EE.z ends up well below 0.78 -> flip signs of BOTH j2 and j3.
+  # If upper arm OK but forearm points the wrong way -> flip only j3.
+  #
+  # Final tuned L-shape pose:
+  #   j1 = +/-1.10   shoulder yaw (outward abduction; sign mirrored)
+  #   j2 = +1.5708   shoulder pitch (upper arm vertical up)
+  #   j3 = +1.5708   elbow (forearm horizontal, 90 deg wrt upper arm)
+  #   j4 = 0
+  #   j5 = +/-1.5708 wrist roll (90 deg around forearm axis); MIRRORED
+  #                  sign per arm so the two grippers face symmetrically
+  #                  outward (chosen empirically: left=+1.5708,
+  #                  right=-1.5708 looks right on the observer camera).
+  #   j6 = 0
+  # Full tuning history:
+  #   [ 0.30, 0.40, 0.80, 0.0, 0.80, 0.0]            # folded forward (original)
+  #   [ 1.10, 0.10, 0.10, 0.0, 0.10, 0.0]            # spread open, flat
+  #   [ 1.10,-1.5708,-1.5708, 0.0, 0.0, 0.0]         # collapsed at shoulder
+  #   [ 1.10, 1.5708, 0.0,    0.0, 0.0, 0.0]         # upper-arm up, forearm folded back (theta~127)
+  #   [ 1.10, 1.5708,-1.5708, 0.0, 0.0, 0.0]         # angle wrong way (theta~144)
+  #   [ 1.10, 1.5708,+1.5708, 0.0, 0.0, 0.0]         # L-shape (wrist not yet rolled)
+  #   both j5=+1.5708                                # picture-right OK, picture-left wrong
+  #   left j5=-1.5708, right j5=+1.5708              # both ended up wrong (mirrored the wrong way)
+  left_home:  [ 1.10, 1.5708, 1.5708, 0,  1.5708, 0]
+  right_home: [-1.10, 1.5708, 1.5708, 0, -1.5708,  0]

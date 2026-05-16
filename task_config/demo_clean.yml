@@ -1,7 +1,7 @@
 # if you want to modify the config, please check the following tutorial first:
 # https://robotwin-platform.github.io/doc/usage/configurations.html
 render_freq: 0
-episode_num: 50
+episode_num: 2
 use_seed: false
 save_freq: 15
 embodiment: [aloha-agilex]
@@ -28,6 +28,8 @@ camera:
   head_camera_fovy: 55
   head_camera_w: 1280
   head_camera_h: 720
+  head_camera_position: [0, -0.45, 1.6]
+  head_camera_forward: [0, 0.3, -0.9]
   # Which view is used to render the final mp4 video.
   #   default  -> head_camera (first-person / wrist head)
   #   observer -> static third-person observer_camera (covers both arms)
