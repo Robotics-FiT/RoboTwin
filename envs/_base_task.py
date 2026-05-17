@@ -739,6 +739,28 @@ class Base_Task(gym.Env):
                               default_color=default_color,
                               clear_texture=clear_texture, verbose=verbose)
 
+        # Optional hiding of non-arm "dressing" links (mobile-base chassis,
+        # decorative head pillar, decorative RealSense mesh, wheels, ...).
+        # Triggered by ``hide_robot_dressing: true`` in the task yaml. Useful
+        # when the head_camera is mounted high enough that the central pillar
+        # blocks the view of the tabletop. Optional ``hide_robot_dressing_rules``
+        # overrides the default link-name list (see
+        # envs/utils/robot_coloring.py: DEFAULT_HIDE_RULES).
+        hide_cfg = kwags.get("hide_robot_dressing", False)
+        if hide_cfg:
+            from .utils.robot_coloring import (
+                hide_robot_dressing, DEFAULT_HIDE_RULES,
+            )
+            hide_rules = kwags.get("hide_robot_dressing_rules", None)
+            if hide_rules is None:
+                hide_rules = DEFAULT_HIDE_RULES
+            hide_verbose = bool(kwags.get("hide_robot_dressing_verbose", False))
+            hide_robot_dressing(self.robot.left_entity, rules=hide_rules,
+                                verbose=hide_verbose)
+            if self.robot.right_entity is not self.robot.left_entity:
+                hide_robot_dressing(self.robot.right_entity, rules=hide_rules,
+                                    verbose=hide_verbose)
+
     def load_camera(self, hdri_path=None, **kwags):
         """
         Add cameras and set camera parameters
@@ -858,6 +880,50 @@ class Base_Task(gym.Env):
         self.cameras.update_picture()
         rgb = self.cameras.get_rgb()
         save_img(save_path, rgb[camera_name]['rgb'])
+
+    def save_final_frame_pic(self, images_dir, ep_num):
+        """Render exactly one head-camera frame and one observer-camera frame
+        of the *current* scene state and save them as PNGs under ``images_dir``.
+
+        Used by the ``generate_pic`` mode in ``script/collect_data.py``: with
+        that mode on, the data-collection pipeline is run normally (so the
+        physics / planning / play_once logic is unchanged) but per-step rgb
+        capture, pkl caching, hdf5 building and mp4 encoding are all disabled
+        (``save_data=False`` makes ``_take_picture`` / ``merge_pkl_to_hdf5_video``
+        no-ops). At the very end of an episode we instead grab two snapshots:
+
+          - ``episode<N>_head.png``     -- first-person (head_camera)
+          - ``episode<N>_observer.png`` -- third-person (observer_camera)
+
+        Must be called *before* ``close_env`` so the SAPIEN scene is still alive.
+        """
+        import imageio
+        os.makedirs(images_dir, exist_ok=True)
+
+        self._update_render()
+        # ``update_picture`` refreshes wrist + head cameras. observer_camera is
+        # taken separately inside ``get_observer_rgb`` so we don't need to add
+        # it here.
+        self.cameras.update_picture()
+
+        head_path = os.path.join(images_dir, f"episode{ep_num}_head.png")
+        observer_path = os.path.join(images_dir, f"episode{ep_num}_observer.png")
+
+        try:
+            rgb = self.cameras.get_rgb()
+            head_rgb = rgb.get("head_camera", {}).get("rgb", None)
+            if head_rgb is not None:
+                imageio.imwrite(head_path, head_rgb)
+            else:
+                print(f"[generate_pic] head_camera rgb unavailable -- skipping {head_path}")
+        except Exception as e:
+            print(f"[generate_pic] failed to save head_camera image: {e}")
+
+        try:
+            observer_rgb = self.cameras.get_observer_rgb()
+            imageio.imwrite(observer_path, observer_rgb)
+        except Exception as e:
+            print(f"[generate_pic] failed to save observer_camera image: {e}")
 
     def _take_picture(self):  # save data
         if not self.save_data:

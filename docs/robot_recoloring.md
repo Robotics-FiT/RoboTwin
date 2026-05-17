@@ -327,3 +327,200 @@ and inspect `data/random_dance/random_dance/video/episode0.mp4`. The
 shoulder should be a flat solid blue with **no** "AGILE-X" logo
 visible — that is the easiest one-glance confirmation that the texture
 clearing actually fired.
+
+---
+
+## Hiding decorative links (`hide_robot_dressing`)
+
+Recoloring solved "I can't tell the joints apart"; it did NOT solve
+"the head_camera view is blocked by stuff that isn't actually part of
+this robot". The aloha-agilex URDF carries several visual-only meshes
+that are scenery rather than functional joints — most importantly, an
+unused **rear pair of arms** (`lr_*` and `rr_*`) and a **decorative
+head-mounted RealSense tower** (`camera_base_link` + `camera_link1..3`).
+None of them are commanded by the policy, but they all happily render
+into the head_camera image as foreground occluders.
+
+The implementation is in the same module as recoloring:
+
+- `envs/utils/robot_coloring.py::hide_robot_dressing(...)` — the hider
+  + `DEFAULT_HIDE_RULES`
+- `envs/_base_task.py::load_robot` — opt-in hook reading
+  `hide_robot_dressing` and `hide_robot_dressing_rules` from the yaml
+
+### TL;DR — How to use it
+
+```yaml
+# Turn on dressing-hide (off by default)
+hide_robot_dressing: true
+
+# Optional: override the per-link match list. Same token-aware matcher as
+# the recolor scheme (so ``box1_link`` doesn't swallow ``camera_base_link``).
+# hide_robot_dressing_rules:
+#   - box1_link
+#   - camera_base_link
+#   - camera_link1
+#   - camera_link2
+#   - camera_link3
+#   - inertial_link
+#   - lr_base_link
+#   - lr_link1
+#   - lr_link2
+#   - lr_link3
+#   - lr_link4
+#   - lr_link5
+#   - lr_link6
+#   - lr_link7
+#   - rr_base_link
+#   - rr_link1
+#   - rr_link2
+#   - rr_link3
+#   - rr_link4
+#   - rr_link5
+#   - rr_link6
+#   - rr_link7
+#   # extras you might also want to hide:
+#   - box2_link   # shoulder pedestal under the arms
+#   - base_link   # mobile chassis
+#   - wheel
+#   - castor
+```
+
+### Default hide list
+
+| Rule              | What it hides                      | Why |
+|-------------------|------------------------------------|-----|
+| `box1_link`       | the central lower-torso pillar     | dominates the head_camera silhouette |
+| `camera_base_link`+`camera_link1..3` | decorative D435 tower mesh | cosmetic; not the real head_camera |
+| `inertial_link`   | inertia-only helper link           | no visual anyway, kept for clarity |
+| `lr_base_link`+`lr_link1..7`         | unused rear-left arm    | URDF leftover, never commanded |
+| `rr_base_link`+`rr_link1..7`         | unused rear-right arm   | URDF leftover, never commanded |
+
+What is **kept** by default and why:
+
+- `base_link`, `wheel`, `castor`, `footprint` — the mobile chassis +
+  wheels. Removing them makes the robot look like it is floating.
+- `box2_link` — the **shoulder pedestal** directly under the arms.
+  Despite the name "box", its mesh is a wide, low pedestal slab
+  (`box2_Link.dae`, see the geometry table above; ~700 mm wide × 787 mm
+  tall once you account for its visual rpy) that visually anchors the
+  arms to the chassis. It does NOT obstruct the head_camera, so it
+  stays.
+- `fl_*`, `fr_*` — the two arms the policy actually commands.
+
+If you need a more aggressive hide (e.g. you want a totally floating
+pair of arms on a clean background for synthetic pretraining), copy the
+list above and append `box2_link` / `base_link` / `wheel` / `castor` /
+`footprint`.
+
+### The matcher reuses the token-aware logic from recoloring
+
+`hide_robot_dressing_rules` go through the same `_matches_link(...)`
+function used by the recolor scheme. That means:
+
+- `box1_link` matches `box1_Link` (case-insensitive) but does **not**
+  match `camera_base_link` or `box2_Link`.
+- `lr_link1` matches `lr_link1` but does NOT match `fl_link1`.
+- Multi-token rules require a `_match` suffix of the link name (so
+  `base_link` matches `base_link` itself but not `fl_base_link`).
+
+This means it is safe to copy/paste any subset of `DEFAULT_HIDE_RULES`
+into a yaml override without accidentally hiding shoulders or wheels.
+
+### Why hiding is harder than it looks on SAPIEN 3.x
+
+Naive "iterate `RenderBodyComponent.render_shapes` and call
+`set_visibility(0)` on each shape" works on **some** SAPIEN builds but
+silently no-ops on others. Symptoms:
+
+- The verbose output prints `0 shape(s) hidden` for every matched link
+  even though `_matches_link` is happy. → The link's visuals live on a
+  different component (`RenderShapeComponent`, `VisualBodyComponent`,
+  …), not on the one we expected, OR they live on a component that
+  doesn't expose `render_shapes` as an iterable Python attribute at
+  all.
+- `shape.visibility = 0` succeeds as a Python attribute write but the
+  renderer keeps drawing the shape, because that build only honours
+  `set_visibility(...)` (or only honours `disable()` on the parent
+  component).
+
+`hide_robot_dressing` therefore tries every reasonable path and
+counts how many it actually managed to silence:
+
+1. Walk **every** component on the entity whose class name contains
+   `Render` or `Visual`.
+2. For each such component, try `render_shapes` first, then
+   `get_render_shapes()`, then `visual_shapes`, then
+   `get_visual_shapes()`. Whatever comes back is iterated.
+3. For each shape: try property write `visibility = 0`, then
+   `set_visibility(0)`, then `disable()`.
+4. If the component still looks alive (e.g. the build exposes neither
+   shapes nor a per-shape visibility), fall back to **component-level**
+   `disable()` / `set_disabled(True)`, and as a last resort
+   `entity.remove_component(component)`.
+
+Verbose mode prints `N shape(s), K component(s) disabled; comps=[…]` so
+you can tell which path actually fired on your build. If you see `0,
+0` but the link is still visible, the link's visuals live on yet
+another component class — extend `_iter_render_components(...)` rather
+than re-reading `render_shapes` from a different angle.
+
+### Bug we hit and the fix
+
+**Symptom**: ran with `hide_robot_dressing_rules: [box1_link,
+camera_base_link, lr_link1, …]` + `hide_robot_dressing_verbose: true`,
+got per-link logs like `box1_link -> hidden (0 shape(s), …)`, and the
+collected video still showed the central pillar and the rear arms.
+
+**Root cause**: this build's link entities had a `RenderBodyComponent`
+on which `render_shapes` evaluated to an empty tuple, AND the actual
+visual meshes were attached as separate `RenderShapeComponent`
+instances on the **same** entity. Iterating only the body's
+`render_shapes` thus always returned 0.
+
+**Fix**: the multi-component / multi-attribute fallback chain
+described above. After the change every matched link reports a
+non-zero `(shape(s), component(s) disabled)` pair, and the head_camera
+view is finally clear.
+
+### Related sub-bug — `box2_link` looks like "the chassis"
+
+The first iteration of `DEFAULT_HIDE_RULES` also hid `box2_link`
+because the name suggests "another box on the torso". In the rendered
+scene this looks dramatic: with `box2_link` hidden, the arms appear
+to float just above the wheels, with no visible attachment.
+
+The user wanted to keep that piece (the shoulder pedestal) visible,
+even though the URDF *name* sounds incidental. Lesson: link names like
+`box1` / `box2` don't tell you what the mesh actually looks like —
+always cross-reference with the bbox table in the "Per-link geometry"
+section above before deciding what's "decorative".
+
+### How to verify locally
+
+Pre-render check (no GPU video, just the head_camera PNG that
+`generate_pic: true` saves):
+
+```yaml
+# in your task config
+generate_pic: true
+hide_robot_dressing: true
+hide_robot_dressing_verbose: true
+```
+
+```
+bash collect_data.sh random_dance <task_config> 0
+```
+
+Then open `data/<task>/<task_config>/images/episode0_head.png` and
+confirm:
+
+- the central pillar (`box1_Link`) is gone,
+- there's only one pair of arms (no rear `lr_*`/`rr_*` ghost arms),
+- the chassis + wheels + shoulder pedestal (`box2_Link`) are still
+  there.
+
+If anything looks wrong, re-run with `hide_robot_dressing_verbose:
+true` and check the per-link `N shape(s), K component(s)` summary —
+zeros there mean the matcher hit the link but no rendering path was
+silenced (extend `_iter_render_components`).

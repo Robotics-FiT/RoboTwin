@@ -150,6 +150,22 @@ def _iter_render_components(entity_or_articulation) -> Iterable:
         yield link.get_name(), rb
 
 
+def _iter_links(entity_or_articulation) -> Iterable:
+    """Yield (link_name, link_component, entity) for every link.
+
+    Unlike :func:`_iter_render_components`, this does NOT require a
+    ``RenderBodyComponent`` to be attached -- in some SAPIEN 3.x builds,
+    URDF visuals on certain links end up under a different render
+    component class, so callers that want to act on every link
+    regardless of which renderable variant it has should use this
+    iterator instead.
+    """
+    links = entity_or_articulation.get_links()
+    for link in links:
+        entity = link.entity
+        yield link.get_name(), link, entity
+
+
 def recolor_robot(articulation,
                   scheme: Optional[Sequence[dict]] = None,
                   default_color: Optional[Sequence[float]] = None,
@@ -257,6 +273,231 @@ def recolor_robot(articulation,
         if verbose:
             print(f"[recolor_robot] {link_name:>20s} -> {rgba[:3]} "
                   f"({n_touched} material handle(s) mutated)")
+
+
+# ---------------------------------------------------------------------------
+# Hiding non-arm "dressing" links (mobile base, decorative head camera, ...)
+# ---------------------------------------------------------------------------
+
+# Default substring/token rules for which links to hide on the aloha-agilex
+# embodiment. The intent of the *default* set is intentionally minimal:
+# only hide things that get *between* an elevated head_camera and the
+# tabletop, OR that would otherwise show up as obvious visual artifacts.
+# We deliberately KEEP the chassis (``base_link``) and the wheels /
+# castors visible so screenshots still look like a robot platform, not
+# like four arms floating in midair. If you want a more aggressive hide
+# (chassis + wheels too), copy the commented block from
+# ``task_config/random_dance.yml`` into your task config and uncomment.
+#
+# What the default set DOES hide:
+#   * ``box1_Link`` -- the LOWER cabinet box of the central torso. With
+#       a tall head_camera (e.g. z=1.55) this sits directly between the
+#       camera and the workspace and is the one that occludes the table.
+#   * ``camera_base_link`` / ``camera_link1..3`` -- the *decorative*
+#       RealSense mesh mounted on top of the pillar. It's a visual-only
+#       prop -- nothing to do with the actual SAPIEN head_camera
+#       viewpoint -- so hiding it doesn't change observations.
+#   * ``inertial_link`` -- no visual mesh anyway, just an inertia helper.
+#   * ``lr_*`` / ``rr_*`` -- the URDF defines an entire SECOND pair of
+#       6-DoF arms (left-rear, right-rear) that no task in the repo
+#       actually drives. Their default zero-pose has them standing
+#       upright behind the chassis; from a head_camera mounted high &
+#       looking down they show up as two pale "pillars" right in the
+#       middle of the workspace. Hidden explicitly link by link so the
+#       rule goes through the multi-token / exact-equality matcher
+#       (a bare ``linkN`` rule would also catch fl_/fr_ links, which
+#       we want to keep visible).
+#
+# What the default set does NOT hide (kept visible on purpose):
+#   * ``base_link``  -- chassis / mobile platform (tracer base).
+#   * ``footprint`` -- ground projection (no visual mesh anyway).
+#   * ``*_wheel_link`` / ``*_castor_link`` -- wheels & castors.
+#   * ``box2_Link`` -- the small flat tray that the two arm shoulder
+#       mounts (``fl_base_link`` / ``fr_base_link``) sit on top of.
+#       Visually it reads as the "shoulder pedestal" right under the
+#       magenta hubs; hiding it would leave the arms appearing to
+#       float in midair, so we keep it. It's tucked low enough that
+#       it doesn't occlude the head_camera frame.
+#
+# Arm links (``fl_link*`` / ``fr_link*`` / ``fl_base_link`` /
+# ``fr_base_link`` / gripper fingers ``link7`` / ``link8``) are NEVER
+# in this list -- they are the active manipulators.
+#
+# Each entry is matched with the same token-aware logic as ``recolor``
+# rules (see ``_matches_link``).
+DEFAULT_HIDE_RULES: List[str] = [
+    # Lower torso pillar -- THE one that occludes a high head_camera.
+    # Note: box2_Link (the shoulder pedestal directly under the arms)
+    # is intentionally left visible; see block comment above.
+    "box1_link",
+    # Decorative head-mounted RealSense mesh -- not the real head_camera.
+    "camera_base_link",
+    "camera_link1",
+    "camera_link2",
+    "camera_link3",
+    # Inertia helper, no visual mesh anyway.
+    "inertial_link",
+    # Unused rear pair of arms (lr_* and rr_*); see block comment above.
+    "lr_base_link",
+    "lr_link1", "lr_link2", "lr_link3",
+    "lr_link4", "lr_link5", "lr_link6", "lr_link7",
+    "rr_base_link",
+    "rr_link1", "rr_link2", "rr_link3",
+    "rr_link4", "rr_link5", "rr_link6", "rr_link7",
+]
+
+
+def hide_robot_dressing(articulation,
+                         rules: Optional[Sequence[str]] = None,
+                         verbose: bool = False) -> None:
+    """Hide non-arm "dressing" links from the renderer.
+
+    Iterates the articulation's links and, for any link whose name matches
+    one of ``rules`` (token-aware match, same semantics as recolor rules),
+    flips every render shape on its ``RenderBodyComponent`` to
+    ``visibility = 0``. This affects rendering ONLY -- physics, collision
+    and joint behaviour are untouched.
+
+    Why we don't just edit the URDF: the same URDF is shared across every
+    task that uses the aloha-agilex embodiment, and most tasks WANT the
+    chassis / pillar visible (e.g. for video demos that show the whole
+    robot). Hiding at runtime keeps this opt-in per task.
+
+    Why we don't just remove the components: SAPIEN's articulation owns
+    those entities; deleting their RenderBodyComponent risks crashing the
+    renderer's bookkeeping. Setting per-shape ``visibility = 0`` is the
+    documented escape hatch.
+
+    Parameters
+    ----------
+    articulation : sapien PhysxArticulation
+        Loaded URDF (e.g. ``self.robot.left_entity``).
+    rules : list of substring/token strings, optional
+        Defaults to ``DEFAULT_HIDE_RULES``. Empty list -> no-op.
+    verbose : bool
+        Print a one-line summary per hidden link.
+    """
+    if rules is None:
+        rules = DEFAULT_HIDE_RULES
+    rules_lc = [str(r).lower() for r in rules]
+    if not rules_lc:
+        return
+
+    for link_name, link, entity in _iter_links(articulation):
+        name_lc = link_name.lower()
+        matched = next((r for r in rules_lc if _matches_link(name_lc, r)), None)
+        if matched is None:
+            continue
+
+        # Collect EVERY render-ish component on this entity. SAPIEN 3.x
+        # has historically shipped with multiple visual component classes
+        # (``RenderBodyComponent``, ``RenderShapeComponent``, the newer
+        # ``VisualBodyComponent`` etc.) and which one a URDF ``<visual>``
+        # ends up under depends on the exact build. We don't pre-commit
+        # to a single class -- instead we duck-type by attribute.
+        try:
+            comps = list(entity.get_components()) or []
+        except Exception:
+            try:
+                comps = list(entity.components) or []
+            except Exception:
+                comps = []
+
+        n_hidden = 0           # number of shape-level hides we performed
+        n_comp_disabled = 0    # number of components we toggled / removed
+        comp_kinds: List[str] = []
+
+        for comp in comps:
+            cls_name = type(comp).__name__
+            # Skip the physics link itself; only target render-ish ones.
+            if "Render" not in cls_name and "Visual" not in cls_name:
+                continue
+            comp_kinds.append(cls_name)
+
+            # Path 1: enumerate render shapes (works on
+            # ``RenderBodyComponent`` & friends).
+            shapes = []
+            for attr in ("render_shapes", "shapes", "visual_shapes"):
+                v = getattr(comp, attr, None)
+                if v:
+                    try:
+                        shapes = list(v)
+                    except Exception:
+                        shapes = []
+                    if shapes:
+                        break
+            for shape in shapes:
+                hid = False
+                try:
+                    shape.visibility = 0.0
+                    hid = True
+                except Exception:
+                    pass
+                if not hid:
+                    for setter in ("set_visibility", "set_visible"):
+                        fn = getattr(shape, setter, None)
+                        if fn is None:
+                            continue
+                        try:
+                            fn(0.0 if setter == "set_visibility" else False)
+                            hid = True
+                            break
+                        except Exception:
+                            continue
+                if hid:
+                    n_hidden += 1
+
+            # Path 2: disable the component as a whole. This is the
+            # nuclear option that catches every render-component flavour
+            # SAPIEN ships, including ones that don't expose a
+            # per-shape ``visibility`` (e.g. some ``RenderShapeComponent``
+            # builds). We try, in order: ``visibility`` on the component,
+            # ``set_property("enabled", False)``, ``disable()``, and as a
+            # last resort detach the component from the entity.
+            comp_changed = False
+            try:
+                comp.visibility = 0.0
+                comp_changed = True
+            except Exception:
+                pass
+            if not comp_changed:
+                fn = getattr(comp, "set_visibility", None)
+                if fn is not None:
+                    try:
+                        fn(0.0)
+                        comp_changed = True
+                    except Exception:
+                        pass
+            if not comp_changed:
+                fn = getattr(comp, "disable", None)
+                if fn is not None:
+                    try:
+                        fn()
+                        comp_changed = True
+                    except Exception:
+                        pass
+            if not comp_changed:
+                # Last resort: physically detach the component. This is
+                # safe for purely-visual components; we never touch the
+                # PhysxArticulationLinkComponent.
+                for remover in ("remove_component", "remove_from_scene"):
+                    fn = getattr(entity, remover, None)
+                    if fn is None:
+                        continue
+                    try:
+                        fn(comp)
+                        comp_changed = True
+                        break
+                    except Exception:
+                        continue
+            if comp_changed:
+                n_comp_disabled += 1
+
+        if verbose:
+            comp_str = ",".join(comp_kinds) if comp_kinds else "<none>"
+            print(f"[hide_robot_dressing] {link_name:>20s} -> hidden "
+                  f"({n_hidden} shape(s), {n_comp_disabled} component(s) "
+                  f"disabled; comps=[{comp_str}]; rule={matched!r})")
 
 
 def _mutate_material_inplace(mat, rgba, metallic, roughness,

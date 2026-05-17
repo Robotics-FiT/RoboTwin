@@ -13,11 +13,22 @@ hdri_sun_max_elevation_deg: 80.0   # 想封顶避免阴影太短
 render_freq: 0
 # Number of episodes collected per run. Lower this while debugging (e.g. 3),
 # raise it (e.g. 50) when actually producing data for training.
-episode_num: 1
+episode_num: 10
 use_seed: false
 save_freq: 15
 embodiment: [aloha-agilex]
 language_num: 0
+
+# When true, run the full simulation normally but DO NOT render a video and
+# DO NOT build an hdf5. Instead, after each episode finishes, save just two
+# PNGs of the final frame:
+#     data/<task>/images/episode<N>_head.png      (first-person, head_camera)
+#     data/<task>/images/episode<N>_observer.png  (third-person, observer_camera)
+# Useful for quickly previewing what the tabletop looks like across many
+# random seeds (e.g. with random_dance.borrow_actors_from set) without paying
+# the cost of full video rendering and hdf5 writes. Resume / skip-existing
+# uses the presence of the PNG pair (instead of episode<N>.hdf5).
+generate_pic: true
 domain_randomization:
   random_background: true
   cluttered_table: true
@@ -57,6 +68,18 @@ camera:
   # random pose on a partial sphere around the tabletop (good for visual
   # augmentation).
   third_person_view: observer
+  head_camera_w: 1280
+  head_camera_h: 720
+  head_camera_fovy: 55
+  # Mount the head_camera higher up and further back than the embodiment
+  # default of position=(-0.032, -0.45, 1.35). Pulling z from 1.35 -> 1.55 m
+  # and y from -0.45 -> -0.60 m gives a wider-angle "over the shoulder"
+  # feel: the whole tabletop fits more comfortably and the upper third of
+  # the frame leaves room for the HDRI background instead of being filled
+  # by the wall / table edge. Tweak: more negative y -> further back;
+  # larger z -> higher mount.
+  head_camera_position: [0, -0.6, 1.55]
+  head_camera_forward: [0, 0.6, -0.8]
   # Knobs for the fixed "observer" third-person view (third_person_view == observer).
   # Defaults: telephoto-style framing -- narrow fovy (28 deg) + camera pulled back
   # to ~1.55 m on the +y side of the table, aimed at a point ~0.95 m above the
@@ -99,6 +122,61 @@ eval_video_log: true
 # shoulder mount magenta, etc.). Implementation: envs/utils/robot_coloring.py.
 # Set to false to keep the original URDF textures.
 recolor_robot: true
+# Hide non-arm "dressing" links. The default set hides:
+#   * the LOWER torso pillar (``box1_Link``) -- otherwise it sits between
+#     an elevated head_camera and the workspace. The small flat tray
+#     directly under the arm shoulders (``box2_Link``) is intentionally
+#     LEFT VISIBLE so the arms have a visible "shoulder pedestal" to sit
+#     on instead of appearing to float in midair.
+#   * the decorative head-mounted RealSense mesh (``camera_*``), which
+#     is *not* the actual head_camera viewpoint (purely a visual prop),
+#   * the unused rear pair of arms ``lr_*`` / ``rr_*`` that the URDF
+#     defines but no task actually drives -- they would otherwise show
+#     up as two pale "pillars" in the middle of the head_camera frame.
+# The default set DELIBERATELY KEEPS the chassis (``base_link``), the
+# wheels, the castors AND ``box2_Link`` (shoulder pedestal) visible so
+# the robot still looks anchored in screenshots / videos. If you want
+# a more aggressive hide, uncomment ``hide_robot_dressing_rules`` below
+# and add the chassis / wheel / castor / box2 entries you want gone.
+# Affects rendering only -- physics, IK and collisions are unchanged.
+# See envs/utils/robot_coloring.py: DEFAULT_HIDE_RULES for the full
+# link list and matching rules.
+hide_robot_dressing: true
+# hide_robot_dressing_verbose: true   # log which links got hidden (set false to silence)
+# Optional override (list of link-name tokens, same matching rules as
+# recolor_scheme). Omit to use DEFAULT_HIDE_RULES. Uncommenting this
+# block REPLACES the default set entirely -- so if you only want to
+# *add* the chassis / wheels on top of the defaults, list everything.
+# hide_robot_dressing_rules:
+#   # --- default set: lower pillar + decorative head camera + dummy rear arms
+#   - box1_link
+#   - camera_base_link
+#   - camera_link1
+#   - camera_link2
+#   - camera_link3
+#   - inertial_link
+#   - lr_base_link
+#   - lr_link1
+#   - lr_link2
+#   - lr_link3
+#   - lr_link4
+#   - lr_link5
+#   - lr_link6
+#   - lr_link7
+#   - rr_base_link
+#   - rr_link1
+#   - rr_link2
+#   - rr_link3
+#   - rr_link4
+#   - rr_link5
+#   - rr_link6
+#   - rr_link7
+#   # --- extras: uncomment if you also want chassis / wheels / pedestal gone
+#   # - box2_link        # tray right under fl/fr_base_link (the "shoulder pedestal")
+#   # - base_link        # mobile-base chassis (also catches fl/fr/lr/rr_base_link!)
+#   # - wheel            # all four *_wheel_link
+#   # - castor           # all four *_castor_link
+#   # - footprint
 # recolor_verbose: true   # uncomment to print per-link color choices once
 # Optional override; if omitted, ``DEFAULT_SCHEME`` from robot_coloring.py
 # is used. Each rule's ``match`` is a case-insensitive substring of the
@@ -139,6 +217,15 @@ random_dance:
   #             visibly calmer/more deliberate motion. Good for training
   #             data that emphasises steady-state poses over transitions.
   preset: default
+  # Borrow the tabletop layout from another task (any task in envs/ that
+  # exposes a ``load_actors`` method). With this set, random_dance still runs
+  # its own play_once / ik_debug / home_debug, but the named task's actors
+  # (e.g. the hammer + block from beat_block_hammer) are spawned on the
+  # tabletop. To keep data organised by what is *on* the table, output is
+  # routed to ``data/<borrow_actors_from>/<task_config>/`` instead of
+  # ``data/random_dance/<task_config>/``. Set to null / remove the line to
+  # disable.
+  borrow_actors_from: beat_block_hammer
   # ik_debug-only knobs
   ik_debug_hover: 0.20    # metres above the table top
   ik_debug_forward: 0.20  # metres toward observer camera (+y direction)

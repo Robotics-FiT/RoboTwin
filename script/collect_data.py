@@ -47,6 +47,21 @@ def main(task_name=None, task_config=None):
 
     args['task_name'] = task_name
 
+    # ``random_dance`` supports a ``borrow_actors_from: <other_task>`` knob:
+    # the simulation still runs random_dance's play_once / ik_debug / etc.,
+    # but the tabletop layout is taken from the named other task. To keep the
+    # output organised by *what is on the table* rather than *which class
+    # produced the motion*, we route the saved data into
+    # ``data/<borrow_target>/<task_config>/`` instead of
+    # ``data/random_dance/<task_config>/``. The class loaded via
+    # ``class_decorator`` above is unaffected (it's still random_dance).
+    _borrow = (((args.get("random_dance") or {}).get("borrow_actors_from")) or "")
+    _borrow = str(_borrow).strip()
+    if task_name == "random_dance" and _borrow:
+        print(f"\033[95m[random_dance] borrowing tabletop from '{_borrow}'; "
+              f"output will be saved under data/{_borrow}/{task_config}/\033[0m")
+        args["task_name"] = _borrow
+
     embodiment_type = args.get("embodiment")
     embodiment_config_path = os.path.join(CONFIGS_PATH, "_embodiment_config.yml")
 
@@ -217,6 +232,25 @@ def run(TASK_ENV, args):
         args["render_freq"] = 0
         args["save_data"] = True
 
+        # ``generate_pic`` mode: run the full simulation (so the scene, the
+        # play_once / ik_debug logic, randomisation and the borrow-actors-from
+        # plumbing all behave identically), but DON'T render a video and DON'T
+        # build the hdf5. Instead, after each episode finishes, save just two
+        # PNGs of the final frame:
+        #     data/<task>/images/episode<N>_head.png
+        #     data/<task>/images/episode<N>_observer.png
+        # We achieve "no video / no hdf5 / no pkl cache" by forcing
+        # ``save_data=False``: ``_take_picture`` and ``merge_pkl_to_hdf5_video``
+        # both short-circuit when ``self.save_data`` is False (see
+        # ``envs/_base_task.py``).
+        generate_pic = bool(args.get("generate_pic", False))
+        if generate_pic:
+            args["save_data"] = False
+            images_dir = os.path.join(args["save_path"], "images")
+            os.makedirs(images_dir, exist_ok=True)
+            print(f"\033[95m[generate_pic] enabled -- skipping video/hdf5; "
+                  f"saving final-frame PNGs to {images_dir}/\033[0m")
+
         clear_cache_freq = args["clear_cache_freq"]
 
         st_idx = 0
@@ -225,8 +259,19 @@ def run(TASK_ENV, args):
             file_path = os.path.join(args["save_path"], 'data', f'episode{idx}.hdf5')
             return os.path.exists(file_path)
 
-        while exist_hdf5(st_idx):
-            st_idx += 1
+        def exist_pic(idx):
+            head_p = os.path.join(args["save_path"], "images", f"episode{idx}_head.png")
+            obs_p = os.path.join(args["save_path"], "images", f"episode{idx}_observer.png")
+            return os.path.exists(head_p) and os.path.exists(obs_p)
+
+        # In generate_pic mode, resume by looking for already-saved PNG pairs
+        # instead of hdf5 files (since no hdf5 is produced).
+        if generate_pic:
+            while exist_pic(st_idx):
+                st_idx += 1
+        else:
+            while exist_hdf5(st_idx):
+                st_idx += 1
 
         for episode_idx in range(st_idx, args["episode_num"]):
             print(f"\033[34mTask name: {args['task_name']}\033[0m")
@@ -256,15 +301,28 @@ def run(TASK_ENV, args):
             with open(info_file_path, "w", encoding="utf-8") as file:
                 json.dump(info_db, file, ensure_ascii=False, indent=4)
 
+            # In generate_pic mode, grab the two final-frame PNGs BEFORE
+            # close_env so the SAPIEN scene is still alive.
+            if generate_pic:
+                pic_t0 = time.perf_counter()
+                TASK_ENV.save_final_frame_pic(
+                    images_dir=os.path.join(args["save_path"], "images"),
+                    ep_num=episode_idx,
+                )
+                print(f"[generate_pic] episode {episode_idx}: final-frame PNGs "
+                      f"saved in {time.perf_counter() - pic_t0:.2f}s")
+
             TASK_ENV.close_env(clear_cache=((episode_idx + 1) % clear_cache_freq == 0))
 
             # Measure the hdf5/mp4 merge separately so we can tell whether the
             # bottleneck is the renderer itself or the post-processing.
             merge_t0 = time.perf_counter()
-            TASK_ENV.merge_pkl_to_hdf5_video()
+            if not generate_pic:
+                TASK_ENV.merge_pkl_to_hdf5_video()
             timings["merge_video_ep"].append(time.perf_counter() - merge_t0)
 
-            TASK_ENV.remove_data_cache()
+            if not generate_pic:
+                TASK_ENV.remove_data_cache()
             assert TASK_ENV.check_success(), "Collect Error"
 
             timings["render_episodes"].append(time.perf_counter() - ep_t0)

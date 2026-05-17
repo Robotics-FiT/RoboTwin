@@ -56,6 +56,15 @@ class random_dance(Base_Task):
     DEFAULT_RIGHT_HOME = [-0.30, 0.60, 0.40, 0.0, 0.80, 0.0]
 
     def setup_demo(self, **kwargs):
+        # ``borrow_actors_from`` lets us reuse another task's tabletop layout
+        # (e.g. ``beat_block_hammer`` to get a hammer + block on the table)
+        # while keeping random_dance's own ``play_once`` / ik_debug / home_debug
+        # logic. Must be set BEFORE ``_init_task_env_`` because that base method
+        # calls back into ``self.load_actors()`` synchronously.
+        dance_cfg_pre = kwargs.get("random_dance", {}) or {}
+        borrow = dance_cfg_pre.get("borrow_actors_from", None)
+        self._borrow_actors_from = (str(borrow).strip() or None) if borrow else None
+
         super()._init_task_env_(**kwargs)
         # Optional per-task overrides from task_config.
         dance_cfg = kwargs.get("random_dance", {}) or {}
@@ -246,11 +255,39 @@ class random_dance(Base_Task):
         reserve a generous prohibited area in front of the robot to keep the
         spawning sane -- we don't want tiny objects directly under the end
         effectors when the arms dance around.
+
+        If ``random_dance.borrow_actors_from: <other_task>`` is set in the
+        task config, we additionally invoke that task's ``load_actors`` on
+        ``self`` so its objects (e.g. the hammer + block from
+        ``beat_block_hammer``) end up on our tabletop. Their ``prohibited_area``
+        entries are appended too, so cluttered_table avoids them.
         """
         # A rectangular band right in front of the robot stays empty so that
         # arms have free space to move. Values are expressed in the table frame
         # (robot base is roughly at y = -0.65).
         self.prohibited_area.append([-0.30, -0.15, 0.30, 0.15])
+
+        borrow = getattr(self, "_borrow_actors_from", None)
+        if borrow:
+            try:
+                import importlib
+                mod = importlib.import_module(f"envs.{borrow}")
+                other_cls = getattr(mod, borrow)
+            except Exception as e:
+                print(f"[random_dance] borrow_actors_from='{borrow}' failed to "
+                      f"import envs.{borrow}.{borrow}: {e}")
+                return
+            # Bind the other task's load_actors to *this* instance so all the
+            # ``self.*`` attribute writes (e.g. self.hammer, self.block) and
+            # all the helper calls (create_actor, rand_pose, add_prohibit_area,
+            # ...) operate on our scene. ``other_cls.load_actors`` is an
+            # unbound function on the class, callable with our ``self``.
+            try:
+                other_cls.load_actors(self)
+                print(f"[random_dance] borrowed tabletop layout from '{borrow}'")
+            except Exception as e:
+                print(f"[random_dance] borrow_actors_from='{borrow}' "
+                      f"raised during load_actors: {e}")
 
     # ------------------------------------------------------------------
     # Dance logic
