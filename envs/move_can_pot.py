@@ -93,6 +93,8 @@ class move_can_pot(Base_Task):
         return self.info
 
     def check_success(self):
+        if not hasattr(self, 'arm_tag'):
+            self.arm_tag = ArmTag("right" if self.can.get_pose().p[0] > 0 else "left")
         pot_pose = self.pot.get_pose().p
         can_pose = self.can.get_pose().p
         can_pose_rpy = t3d.euler.quat2euler(self.can.get_pose().q)

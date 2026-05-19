@@ -116,6 +116,10 @@ class put_object_cabinet(Base_Task):
         return self.info
 
     def check_success(self):
+        if not hasattr(self, 'arm_tag'):
+            self.arm_tag = ArmTag("right" if self.object.get_pose().p[0] > 0 else "left")
+        if not hasattr(self, 'origin_z'):
+            self.origin_z = self.object.get_pose().p[2]
         object_pose = self.object.get_pose().p
         target_pose = self.cabinet.get_functional_point(0)
         tag = np.all(abs(object_pose[:2] - target_pose[:2]) < np.array([0.05, 0.05]))

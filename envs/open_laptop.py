@@ -59,6 +59,9 @@ class open_laptop(Base_Task):
         return self.info
 
     def check_success(self, target=0.4):
+        if not hasattr(self, 'arm_tag'):
+            face_prod = get_face_prod(self.laptop.get_pose().q, [1, 0, 0], [1, 0, 0])
+            self.arm_tag = ArmTag("left" if face_prod > 0 else "right")
         limit = self.laptop.get_qlimits()[0]
         qpos = self.laptop.get_qpos()
         rotate_pose = self.laptop.get_contact_point(1)

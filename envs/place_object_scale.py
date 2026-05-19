@@ -128,6 +128,8 @@ class place_object_scale(Base_Task):
         return self.info
 
     def check_success(self):
+        if not hasattr(self, 'arm_tag'):
+            self.arm_tag = ArmTag("right" if self.object.get_pose().p[0] > 0 else "left")
         object_pose = self.object.get_pose().p
         scale_pose = self.scale.get_functional_point(0)
         distance_threshold = 0.035
